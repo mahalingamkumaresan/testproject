@@ -1,4 +1,4 @@
-Sub ExportGALToCSV()
+Sub ExportTop5GALRecords()
     Dim OutlookApp As Object
     Dim Namespace As Object
     Dim GAL As Object
@@ -6,32 +6,46 @@ Sub ExportGALToCSV()
     Dim csvFile As Object
     Dim filePath As String
     Dim line As String
-    
+    Dim count As Integer
+
     ' Set file path
-    filePath = "C:\Users\Public\GAL_Contacts.csv"
-    
-    ' Create file
+    filePath = "C:\Users\Public\GAL_Top5_Contacts.csv"
+
+    ' Create CSV file
     Set csvFile = CreateObject("Scripting.FileSystemObject").CreateTextFile(filePath, True)
-    
-    ' Write header
-    csvFile.WriteLine "Name,Email,Job Title,Department,Company"
-    
-    ' Initialize Outlook objects
+
+    ' Write header row
+    csvFile.WriteLine "Name,Email,Job Title,Department,Company,Office,Phone,Mobile,Manager"
+
+    ' Initialize Outlook and Global Address List (GAL)
     Set OutlookApp = CreateObject("Outlook.Application")
     Set Namespace = OutlookApp.GetNamespace("MAPI")
     Set GAL = Namespace.AddressLists("Global Address List")
-    
-    ' Loop through each entry
+
+    count = 0
+    ' Loop through Address Entries, only fetching top 5
     For Each AddressEntry In GAL.AddressEntries
         If AddressEntry.AddressEntryUserType = 0 Then ' Ensure it's a user
-            line = AddressEntry.Name & "," & AddressEntry.Address & ","
-            line = line & AddressEntry.GetExchangeUser().JobTitle & ","
-            line = line & AddressEntry.GetExchangeUser().Department & ","
-            line = line & AddressEntry.GetExchangeUser().CompanyName
-            csvFile.WriteLine line
+            Dim user As Object
+            Set user = AddressEntry.GetExchangeUser()
+            
+            If Not user Is Nothing Then
+                line = user.Name & "," & user.PrimarySmtpAddress & ","
+                line = line & user.JobTitle & "," & user.Department & ","
+                line = line & user.CompanyName & "," & user.OfficeLocation & ","
+                line = line & user.BusinessTelephoneNumber & "," & user.MobileTelephoneNumber & ","
+                line = line & IIf(Not user.Manager Is Nothing, user.Manager.Name, "N/A")
+                
+                csvFile.WriteLine line
+                count = count + 1
+            End If
         End If
+
+        ' Stop after 5 records
+        If count >= 5 Then Exit For
     Next AddressEntry
-    
+
     csvFile.Close
     MsgBox "Export completed. File saved at: " & filePath, vbInformation, "Success"
+
 End Sub
