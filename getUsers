@@ -1,4 +1,4 @@
-Sub ExportAllOutlookContactsFast()
+Sub ExportAllOutlookContactsWithLogging()
     Dim OutlookApp As Object
     Dim Namespace As Object
     Dim GAL As Object
@@ -7,6 +7,8 @@ Sub ExportAllOutlookContactsFast()
     Dim ExcelApp As Object
     Dim wb As Object
     Dim ws As Object
+    Dim logFile As Object
+    Dim fso As Object
     Dim rowNum As Long
     Dim NameParts() As String
     Dim FirstName As String
@@ -15,6 +17,20 @@ Sub ExportAllOutlookContactsFast()
     Dim BusinessAddress As String
     Dim DataArray() As Variant
     Dim count As Integer
+    Dim logFilePath As String
+    Dim ManagerName As String
+    Dim ManagerEmail As String
+    Dim startTime As Double
+    
+    ' Set log file path
+    logFilePath = "C:\Users\Public\Outlook_Export_Log.txt"
+
+    ' Initialize File System Object for logging
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set logFile = fso.OpenTextFile(logFilePath, 8, True) ' Open in append mode
+    
+    ' Start logging
+    logFile.WriteLine "Export started at: " & Now
 
     ' Initialize Outlook and Global Address List (GAL)
     On Error Resume Next
@@ -24,6 +40,8 @@ Sub ExportAllOutlookContactsFast()
     On Error GoTo 0
 
     If OutlookApp Is Nothing Or GAL Is Nothing Then
+        logFile.WriteLine "ERROR: Unable to access Outlook GAL. Check Outlook settings."
+        logFile.Close
         MsgBox "Error: Unable to access Outlook GAL. Check your Outlook settings.", vbCritical, "Outlook Error"
         Exit Sub
     End If
@@ -78,12 +96,24 @@ Sub ExportAllOutlookContactsFast()
                     LastName = "Unknown"
                 End If
 
-                ' Fix for missing Business Address (Try multiple fields)
+                ' Fix for missing Business Address
                 On Error Resume Next
                 BusinessAddress = user.OfficeAddress
                 If BusinessAddress = "" Or IsNull(BusinessAddress) Then BusinessAddress = user.BusinessAddress
                 If BusinessAddress = "" Or IsNull(BusinessAddress) Then BusinessAddress = user.StreetAddress
                 If BusinessAddress = "" Or IsNull(BusinessAddress) Then BusinessAddress = "Not Available"
+                On Error GoTo 0
+
+                ' Handle Manager Permission Errors
+                On Error Resume Next
+                ManagerName = user.Manager.Name
+                ManagerEmail = user.Manager.PrimarySmtpAddress
+                If Err.Number <> 0 Then
+                    ManagerName = "Permission Denied"
+                    ManagerEmail = "Permission Denied"
+                    logFile.WriteLine "WARNING: Manager details not accessible for " & FullName
+                End If
+                Err.Clear
                 On Error GoTo 0
 
                 ' Store data in array instead of writing cell by cell
@@ -97,17 +127,8 @@ Sub ExportAllOutlookContactsFast()
                 DataArray(count + 1, 8) = BusinessAddress
                 DataArray(count + 1, 9) = IIf(user.BusinessTelephoneNumber <> "", user.BusinessTelephoneNumber, "N/A")
                 DataArray(count + 1, 10) = IIf(user.MobileTelephoneNumber <> "", user.MobileTelephoneNumber, "N/A")
-
-                ' Fetch manager details safely
-                If Not user.Manager Is Nothing Then
-                    DataArray(count + 1, 11) = user.Manager.Name
-                    DataArray(count + 1, 12) = IIf(user.Manager.PrimarySmtpAddress <> "", user.Manager.PrimarySmtpAddress, "N/A")
-                Else
-                    DataArray(count + 1, 11) = "N/A"
-                    DataArray(count + 1, 12) = "N/A"
-                End If
-
-                ' Notes
+                DataArray(count + 1, 11) = ManagerName
+                DataArray(count + 1, 12) = ManagerEmail
                 DataArray(count + 1, 13) = IIf(user.Notes <> "", user.Notes, "N/A")
 
                 count = count + 1
@@ -129,7 +150,10 @@ Sub ExportAllOutlookContactsFast()
     Dim filePath As String
     filePath = "C:\Users\Public\Outlook_GAL_Contacts.xlsx"
     wb.SaveAs filePath
-    MsgBox "Export completed! " & count & " Outlook contacts have been saved in Excel." & vbCrLf & "File saved at: " & filePath, vbInformation, "Success"
+    logFile.WriteLine "Export completed successfully! " & count & " Outlook contacts saved."
+    logFile.WriteLine "File saved at: " & filePath
+    logFile.WriteLine "Export ended at: " & Now
+    logFile.Close
 
     ' Cleanup
     wb.Close True ' Close Excel file and save changes
@@ -142,4 +166,5 @@ Sub ExportAllOutlookContactsFast()
     Set OutlookApp = Nothing
     Set Namespace = Nothing
     Set GAL = Nothing
+    Set fso = Nothing
 End Sub
