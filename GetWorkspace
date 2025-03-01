@@ -1,0 +1,127 @@
+import pandas as pd
+import requests
+import time
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Configure logging
+logging.basicConfig(filename='bitbucket_audit.log', level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Bitbucket API Credentials
+BITBUCKET_USERNAME = "nbkpjqb"
+BITBUCKET_PASSWORD = "your_password"
+BITBUCKET_BASE_URL = "https://api.bitbucket.org/2.0"
+
+# Rate Limit Settings
+MAX_THREADS = 3  # Limit concurrency
+RETRY_LIMIT = 3  # Retry up to 3 times
+INITIAL_BACKOFF = 10  # Initial wait time in seconds
+
+# Read SPK.xlsx (workspaces)
+def get_workspaces(spk_file):
+    df = pd.read_excel(spk_file)
+    if 'SPK' not in df.columns:
+        raise ValueError("SPK.xlsx must contain a 'SPK' column.")
+    return df['SPK'].dropna().unique().tolist()
+
+# Read commit.xlsx
+def get_commit_data(commit_file):
+    df = pd.read_excel(commit_file)
+    required_columns = {'Repository_name', 'Branch_Name', 'Commit_ID', 'SPK'}
+    if not required_columns.issubset(df.columns):
+        raise ValueError(f"Missing required columns: {required_columns - set(df.columns)}")
+    df['Updated SPK'] = ''
+    return df
+
+# Bitbucket API Request with retries
+def bitbucket_api_request(url):
+    headers = {"Accept": "application/json"}
+    retries = 0
+    backoff = INITIAL_BACKOFF
+    while retries < RETRY_LIMIT:
+        response = requests.get(url, auth=(BITBUCKET_USERNAME, BITBUCKET_PASSWORD), headers=headers)
+        
+        if response.status_code == 200:
+            return response.json()
+        elif response.status_code == 429:  # Rate Limit Hit
+            retry_after = int(response.headers.get("Retry-After", backoff))
+            logging.warning(f"Rate limit hit. Retrying after {retry_after} seconds.")
+            time.sleep(retry_after)
+        elif response.status_code >= 500:
+            logging.warning(f"Server error {response.status_code}. Retrying {retries + 1}/{RETRY_LIMIT}...")
+            time.sleep(backoff)
+        else:
+            logging.error(f"Failed API call to {url}: {response.status_code} - {response.text}")
+            return None
+        
+        retries += 1
+        backoff *= 2  # Exponential backoff
+    return None
+
+# Get all repositories in a workspace
+def get_repositories(workspace):
+    url = f"{BITBUCKET_BASE_URL}/repositories/{workspace}?pagelen=100"
+    repos = []
+    while url:
+        data = bitbucket_api_request(url)
+        if data:
+            repos.extend([repo['slug'] for repo in data.get('values', [])])
+            url = data.get('next')  # Handle pagination
+        else:
+            break
+    return repos
+
+# Get all commits in a repository
+def get_all_commits(workspace, repo):
+    url = f"{BITBUCKET_BASE_URL}/repositories/{workspace}/{repo}/commits?pagelen=100"
+    commits = set()
+    while url:
+        data = bitbucket_api_request(url)
+        if data:
+            commits.update(commit['hash'] for commit in data.get('values', []))
+            url = data.get('next')
+        else:
+            break
+    return commits
+
+# Process each workspace
+def process_workspace(workspace, commit_df):
+    logging.info(f"Processing workspace: {workspace}")
+    updated_rows = 0
+    
+    repos = get_repositories(workspace)
+    for repo in repos:
+        commits = get_all_commits(workspace, repo)
+        
+        for index, row in commit_df.iterrows():
+            if row['Commit_ID'] in commits:
+                commit_df.at[index, 'Updated SPK'] = workspace
+                updated_rows += 1
+    
+    logging.info(f"Updated {updated_rows} rows for workspace: {workspace}")
+    return commit_df
+
+# Main execution
+def update_commit_file(commit_file, spk_file):
+    commit_df = get_commit_data(commit_file)
+    workspaces = get_workspaces(spk_file)
+    
+    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        futures = {executor.submit(process_workspace, ws, commit_df.copy()): ws for ws in workspaces}
+        for future in as_completed(futures):
+            ws = futures[future]
+            try:
+                result_df = future.result()
+                commit_df.update(result_df)
+            except Exception as e:
+                logging.error(f"Error processing workspace {ws}: {e}")
+    
+    # Save updated file
+    output_file = "updated_commit.xlsx"
+    commit_df.to_excel(output_file, index=False)
+    logging.info(f"Updated file saved as {output_file}")
+    return output_file
+
+# Example usage
+# update_commit_file('commit.xlsx', 'SPK.xlsx')
