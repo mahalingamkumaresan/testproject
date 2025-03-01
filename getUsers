@@ -43,8 +43,8 @@ Sub ExportAllOutlookContactsFast()
     Set ws = wb.Sheets(1)
 
     ' Turn off screen updating and calculation for speed
-    ExcelApp.ScreenUpdating = False
-    ExcelApp.Calculation = -4135 ' xlCalculationManual
+    wb.Application.ScreenUpdating = False
+    wb.Application.Calculation = -4135 ' xlCalculationManual
 
     ' Write header row
     Dim Headers As Variant
@@ -118,8 +118,8 @@ Sub ExportAllOutlookContactsFast()
     ws.Range("A2").Resize(count, 13).Value = DataArray
 
     ' Turn screen updating and calculations back on
-    ExcelApp.ScreenUpdating = True
-    ExcelApp.Calculation = -4105 ' xlCalculationAutomatic
+    wb.Application.ScreenUpdating = True
+    wb.Application.Calculation = -4105 ' xlCalculationAutomatic
 
     ' Autofit columns for better readability
     ws.Columns("A:M").AutoFit
@@ -141,4 +141,5 @@ Sub ExportAllOutlookContactsFast()
     Set OutlookApp = Nothing
     Set Namespace = Nothing
     Set GAL = Nothing
+'Uupdate
 End Sub
