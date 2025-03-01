@@ -4,8 +4,8 @@ Sub ExportAllGALContactsIncrementally()
     Dim GAL As Object
     Dim AddressEntry As Object
     Dim user As Object
-    Dim wb As Workbook
-    Dim ws As Worksheet
+    Dim wb As Object
+    Dim ws As Object
     Dim rowNum As Long
     Dim startTime As Double
 
