@@ -1,51 +1,108 @@
-Sub ExportTop5GALRecords()
+Sub ExportAllGALContactsIncrementally()
     Dim OutlookApp As Object
     Dim Namespace As Object
     Dim GAL As Object
     Dim AddressEntry As Object
-    Dim csvFile As Object
-    Dim filePath As String
-    Dim line As String
-    Dim count As Integer
-
-    ' Set file path
-    filePath = "C:\Users\Public\GAL_Top5_Contacts.csv"
-
-    ' Create CSV file
-    Set csvFile = CreateObject("Scripting.FileSystemObject").CreateTextFile(filePath, True)
-
-    ' Write header row
-    csvFile.WriteLine "Name,Email,Job Title,Department,Company,Office,Phone,Mobile,Manager"
+    Dim user As Object
+    Dim wb As Workbook
+    Dim ws As Worksheet
+    Dim rowNum As Long
+    Dim startTime As Double
 
     ' Initialize Outlook and Global Address List (GAL)
+    On Error Resume Next
     Set OutlookApp = CreateObject("Outlook.Application")
     Set Namespace = OutlookApp.GetNamespace("MAPI")
     Set GAL = Namespace.AddressLists("Global Address List")
+    On Error GoTo 0
 
+    If OutlookApp Is Nothing Or GAL Is Nothing Then
+        MsgBox "Error: Unable to access Outlook GAL. Check your Outlook settings.", vbCritical, "Outlook Error"
+        Exit Sub
+    End If
+
+    ' Set workbook and worksheet (use active workbook)
+    Set wb = ThisWorkbook
+    Set ws = wb.Sheets(1) ' Change to appropriate sheet if needed
+
+    ' Write header row
+    ws.Cells(1, 1).Value = "Name"
+    ws.Cells(1, 2).Value = "Email"
+    ws.Cells(1, 3).Value = "Job Title"
+    ws.Cells(1, 4).Value = "Department"
+    ws.Cells(1, 5).Value = "Company"
+    ws.Cells(1, 6).Value = "Office Location"
+    ws.Cells(1, 7).Value = "Phone"
+    ws.Cells(1, 8).Value = "Mobile"
+    ws.Cells(1, 9).Value = "Manager Name"
+    ws.Cells(1, 10).Value = "Manager Email"
+    ws.Cells(1, 11).Value = "Business Fax"
+    ws.Cells(1, 12).Value = "Street Address"
+    ws.Cells(1, 13).Value = "City"
+    ws.Cells(1, 14).Value = "State"
+    ws.Cells(1, 15).Value = "Country"
+    ws.Cells(1, 16).Value = "Alias"
+    ws.Cells(1, 17).Value = "Notes"
+
+    rowNum = 2 ' Start from row 2
+
+    ' Loop through all Address Entries
+    Dim count As Integer
     count = 0
-    ' Loop through Address Entries, only fetching top 5
+
     For Each AddressEntry In GAL.AddressEntries
         If AddressEntry.AddressEntryUserType = 0 Then ' Ensure it's a user
-            Dim user As Object
             Set user = AddressEntry.GetExchangeUser()
             
             If Not user Is Nothing Then
-                line = user.Name & "," & user.PrimarySmtpAddress & ","
-                line = line & user.JobTitle & "," & user.Department & ","
-                line = line & user.CompanyName & "," & user.OfficeLocation & ","
-                line = line & user.BusinessTelephoneNumber & "," & user.MobileTelephoneNumber & ","
-                line = line & IIf(Not user.Manager Is Nothing, user.Manager.Name, "N/A")
+                ' Write user details incrementally
+                ws.Cells(rowNum, 1).Value = user.Name
+                ws.Cells(rowNum, 2).Value = user.PrimarySmtpAddress
+                ws.Cells(rowNum, 3).Value = user.JobTitle
+                ws.Cells(rowNum, 4).Value = user.Department
+                ws.Cells(rowNum, 5).Value = user.CompanyName
+                ws.Cells(rowNum, 6).Value = user.OfficeLocation
+                ws.Cells(rowNum, 7).Value = user.BusinessTelephoneNumber
+                ws.Cells(rowNum, 8).Value = user.MobileTelephoneNumber
                 
-                csvFile.WriteLine line
+                ' Fetch manager details
+                If Not user.Manager Is Nothing Then
+                    ws.Cells(rowNum, 9).Value = user.Manager.Name
+                    ws.Cells(rowNum, 10).Value = user.Manager.PrimarySmtpAddress
+                Else
+                    ws.Cells(rowNum, 9).Value = "N/A"
+                    ws.Cells(rowNum, 10).Value = "N/A"
+                End If
+
+                ' Additional details
+                ws.Cells(rowNum, 11).Value = user.BusinessFaxNumber
+                ws.Cells(rowNum, 12).Value = user.OfficeAddress
+                ws.Cells(rowNum, 13).Value = user.City
+                ws.Cells(rowNum, 14).Value = user.StateOrProvince
+                ws.Cells(rowNum, 15).Value = user.Country
+                ws.Cells(rowNum, 16).Value = user.Alias
+                ws.Cells(rowNum, 17).Value = user.Notes
+
+                ' Increment row number
+                rowNum = rowNum + 1
                 count = count + 1
+                
+                ' Write status update in real-time
+                ws.Cells(1, 18).Value = "Processing: " & count & " records extracted"
+
+                ' **Prevent overload: Add delay (1 second per user)**
+                startTime = Timer
+                Do While Timer < startTime + 1
+                    DoEvents
+                Loop
             End If
         End If
-
-        ' Stop after 5 records
-        If count >= 5 Then Exit For
     Next AddressEntry
 
-    csvFile.Close
-    MsgBox "Export completed. File saved at: " & filePath, vbInformation, "Success"
+    ' Autofit columns for better readability
+    ws.Columns("A:R").AutoFit
+
+    ' Final message
+    MsgBox "Export completed! " & count & " Outlook contacts have been saved in Excel.", vbInformation, "Success"
 
 End Sub
