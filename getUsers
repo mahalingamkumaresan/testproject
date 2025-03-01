@@ -1,0 +1,57 @@
+import win32com.client
+import pandas as pd
+import time
+
+def get_user_details(user):
+    return {
+        'Name': user.Name,
+        'Email': user.PrimarySmtpAddress,
+        'Job Title': user.JobTitle,
+        'Department': user.Department,
+        'Phone': user.BusinessTelephoneNumber,
+        'Mobile': user.MobileTelephoneNumber,
+        'Office Location': user.OfficeLocation,
+        'Company': user.CompanyName,
+        'Manager': user.Manager.Name if user.Manager else None,
+        'Address': user.OfficeAddress,
+        'Country': user.Country,
+        'Alias': user.Alias,
+        'Business Fax': user.BusinessFaxNumber,
+        'Notes': user.Notes
+    }
+
+def get_direct_reports(email, delay=1):
+    outlook = win32com.client.Dispatch("Outlook.Application")
+    namespace = outlook.GetNamespace("MAPI")
+    address_list = namespace.AddressLists("Global Address List")
+    address_entries = address_list.AddressEntries
+
+    user_entry = address_entries.Item(email)
+    if not user_entry:
+        return []
+
+    user = user_entry.GetExchangeUser()
+    if not user:
+        return []
+
+    direct_reports = user.DirectReports
+    direct_reports_list = []
+    for report_entry in direct_reports:
+        report = report_entry.GetExchangeUser()
+        if report:
+            direct_reports_list.append(get_user_details(report))
+            time.sleep(delay)  # Add delay between retrievals
+            direct_reports_list.extend(get_direct_reports(report.PrimarySmtpAddress, delay))
+    return direct_reports_list
+
+def export_to_csv(email, filename, delay=1):
+    direct_reports_list = get_direct_reports(email, delay)
+    df = pd.DataFrame(direct_reports_list)
+    df.to_csv(filename, index=False)
+    print(f"Exported direct reports to {filename}")
+
+if __name__ == "__main__":
+    email_id = input("Enter the email ID: ")
+    filename = input("Enter the CSV filename: ")
+    delay = float(input("Enter delay time between retrievals (in seconds): "))
+    export_to_csv(email_id, filename, delay)
