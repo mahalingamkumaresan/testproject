@@ -1,4 +1,4 @@
-Sub ExportAllGALContactsIncrementally()
+Sub ExportAllOutlookContactsIncrementally()
     Dim OutlookApp As Object
     Dim Namespace As Object
     Dim GAL As Object
@@ -9,6 +9,9 @@ Sub ExportAllGALContactsIncrementally()
     Dim ws As Object
     Dim rowNum As Long
     Dim startTime As Double
+    Dim NameParts() As String
+    Dim FirstName As String
+    Dim LastName As String
 
     ' Initialize Outlook and Global Address List (GAL)
     On Error Resume Next
@@ -36,23 +39,18 @@ Sub ExportAllGALContactsIncrementally()
     Set ws = wb.Sheets(1)
 
     ' Write header row
-    ws.Cells(1, 1).Value = "Name"
-    ws.Cells(1, 2).Value = "Email"
-    ws.Cells(1, 3).Value = "Job Title"
-    ws.Cells(1, 4).Value = "Department"
-    ws.Cells(1, 5).Value = "Company"
+    ws.Cells(1, 1).Value = "First Name"
+    ws.Cells(1, 2).Value = "Last Name"
+    ws.Cells(1, 3).Value = "Email"
+    ws.Cells(1, 4).Value = "Job Title"
+    ws.Cells(1, 5).Value = "Department"
     ws.Cells(1, 6).Value = "Office Location"
-    ws.Cells(1, 7).Value = "Phone"
-    ws.Cells(1, 8).Value = "Mobile"
-    ws.Cells(1, 9).Value = "Manager Name"
-    ws.Cells(1, 10).Value = "Manager Email"
-    ws.Cells(1, 11).Value = "Business Fax"
-    ws.Cells(1, 12).Value = "Street Address"
-    ws.Cells(1, 13).Value = "City"
-    ws.Cells(1, 14).Value = "State"
-    ws.Cells(1, 15).Value = "Country"
-    ws.Cells(1, 16).Value = "Alias"
-    ws.Cells(1, 17).Value = "Notes"
+    ws.Cells(1, 7).Value = "Business Address"
+    ws.Cells(1, 8).Value = "Work Phone"
+    ws.Cells(1, 9).Value = "Mobile Number"
+    ws.Cells(1, 10).Value = "Manager Name"
+    ws.Cells(1, 11).Value = "Manager Email"
+    ws.Cells(1, 12).Value = "Notes"
 
     rowNum = 2 ' Start from row 2
 
@@ -65,34 +63,46 @@ Sub ExportAllGALContactsIncrementally()
             Set user = AddressEntry.GetExchangeUser()
             
             If Not user Is Nothing Then
+                ' Fix for Last Name appearing as "."
+                NameParts = Split(user.Name, " ")
+                If UBound(NameParts) >= 1 Then
+                    FirstName = NameParts(0)
+                    LastName = NameParts(UBound(NameParts)) ' Get last word as last name
+                Else
+                    FirstName = user.Name
+                    LastName = "N/A"
+                End If
+
                 ' Prevent "Object required" error by using error handling
                 On Error Resume Next
-                ws.Cells(rowNum, 1).Value = user.Name
-                ws.Cells(rowNum, 2).Value = user.PrimarySmtpAddress
-                ws.Cells(rowNum, 3).Value = IIf(user.JobTitle <> "", user.JobTitle, "N/A")
-                ws.Cells(rowNum, 4).Value = IIf(user.Department <> "", user.Department, "N/A")
-                ws.Cells(rowNum, 5).Value = IIf(user.CompanyName <> "", user.CompanyName, "N/A")
+                ws.Cells(rowNum, 1).Value = FirstName
+                ws.Cells(rowNum, 2).Value = LastName
+                ws.Cells(rowNum, 3).Value = user.PrimarySmtpAddress
+                ws.Cells(rowNum, 4).Value = IIf(user.JobTitle <> "", user.JobTitle, "N/A") ' Use only first Job Title
+                ws.Cells(rowNum, 5).Value = IIf(user.Department <> "", user.Department, "N/A")
                 ws.Cells(rowNum, 6).Value = IIf(user.OfficeLocation <> "", user.OfficeLocation, "N/A")
-                ws.Cells(rowNum, 7).Value = IIf(user.BusinessTelephoneNumber <> "", user.BusinessTelephoneNumber, "N/A")
-                ws.Cells(rowNum, 8).Value = IIf(user.MobileTelephoneNumber <> "", user.MobileTelephoneNumber, "N/A")
+
+                ' Fix for duplicate business addresses: Use only the first one
+                If user.OfficeAddress <> "" Then
+                    ws.Cells(rowNum, 7).Value = user.OfficeAddress
+                Else
+                    ws.Cells(rowNum, 7).Value = "N/A"
+                End If
+
+                ws.Cells(rowNum, 8).Value = IIf(user.BusinessTelephoneNumber <> "", user.BusinessTelephoneNumber, "N/A")
+                ws.Cells(rowNum, 9).Value = IIf(user.MobileTelephoneNumber <> "", user.MobileTelephoneNumber, "N/A")
 
                 ' Fetch manager details safely
                 If Not user.Manager Is Nothing Then
-                    ws.Cells(rowNum, 9).Value = user.Manager.Name
-                    ws.Cells(rowNum, 10).Value = IIf(user.Manager.PrimarySmtpAddress <> "", user.Manager.PrimarySmtpAddress, "N/A")
+                    ws.Cells(rowNum, 10).Value = user.Manager.Name
+                    ws.Cells(rowNum, 11).Value = IIf(user.Manager.PrimarySmtpAddress <> "", user.Manager.PrimarySmtpAddress, "N/A")
                 Else
-                    ws.Cells(rowNum, 9).Value = "N/A"
                     ws.Cells(rowNum, 10).Value = "N/A"
+                    ws.Cells(rowNum, 11).Value = "N/A"
                 End If
 
-                ' Additional fields (handle empty values safely)
-                ws.Cells(rowNum, 11).Value = IIf(user.BusinessFaxNumber <> "", user.BusinessFaxNumber, "N/A")
-                ws.Cells(rowNum, 12).Value = IIf(user.OfficeAddress <> "", user.OfficeAddress, "N/A")
-                ws.Cells(rowNum, 13).Value = IIf(user.City <> "", user.City, "N/A")
-                ws.Cells(rowNum, 14).Value = IIf(user.StateOrProvince <> "", user.StateOrProvince, "N/A")
-                ws.Cells(rowNum, 15).Value = IIf(user.Country <> "", user.Country, "N/A")
-                ws.Cells(rowNum, 16).Value = IIf(user.Alias <> "", user.Alias, "N/A")
-                ws.Cells(rowNum, 17).Value = IIf(user.Notes <> "", user.Notes, "N/A")
+                ' Notes
+                ws.Cells(rowNum, 12).Value = IIf(user.Notes <> "", user.Notes, "N/A")
                 On Error GoTo 0 ' Resume normal error handling
 
                 ' Increment row number
@@ -100,7 +110,7 @@ Sub ExportAllGALContactsIncrementally()
                 count = count + 1
                 
                 ' Write status update in real-time
-                ws.Cells(1, 18).Value = "Processing: " & count & " records extracted"
+                ws.Cells(1, 13).Value = "Processing: " & count & " records extracted"
 
                 ' **Prevent overload: Add delay (1 second per user)**
                 startTime = Timer
@@ -112,7 +122,7 @@ Sub ExportAllGALContactsIncrementally()
     Next AddressEntry
 
     ' Autofit columns for better readability
-    ws.Columns("A:R").AutoFit
+    ws.Columns("A:L").AutoFit
 
     ' Save the workbook
     Dim filePath As String
