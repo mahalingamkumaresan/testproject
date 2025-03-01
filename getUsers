@@ -4,6 +4,7 @@ Sub ExportAllGALContactsIncrementally()
     Dim GAL As Object
     Dim AddressEntry As Object
     Dim user As Object
+    Dim ExcelApp As Object
     Dim wb As Object
     Dim ws As Object
     Dim rowNum As Long
@@ -21,9 +22,18 @@ Sub ExportAllGALContactsIncrementally()
         Exit Sub
     End If
 
-    ' Set workbook and worksheet (use active workbook)
-    Set wb = ThisWorkbook
-    Set ws = wb.Sheets(1) ' Change to appropriate sheet if needed
+    ' Create a new instance of Excel if not already open
+    On Error Resume Next
+    Set ExcelApp = GetObject(, "Excel.Application")
+    If ExcelApp Is Nothing Then
+        Set ExcelApp = CreateObject("Excel.Application")
+        ExcelApp.Visible = True ' Make Excel visible
+    End If
+    On Error GoTo 0
+
+    ' Create a new workbook
+    Set wb = ExcelApp.Workbooks.Add
+    Set ws = wb.Sheets(1)
 
     ' Write header row
     ws.Cells(1, 1).Value = "Name"
@@ -42,67 +52,4 @@ Sub ExportAllGALContactsIncrementally()
     ws.Cells(1, 14).Value = "State"
     ws.Cells(1, 15).Value = "Country"
     ws.Cells(1, 16).Value = "Alias"
-    ws.Cells(1, 17).Value = "Notes"
-
-    rowNum = 2 ' Start from row 2
-
-    ' Loop through all Address Entries
-    Dim count As Integer
-    count = 0
-
-    For Each AddressEntry In GAL.AddressEntries
-        If AddressEntry.AddressEntryUserType = 0 Then ' Ensure it's a user
-            Set user = AddressEntry.GetExchangeUser()
-            
-            If Not user Is Nothing Then
-                ' Write user details incrementally
-                ws.Cells(rowNum, 1).Value = user.Name
-                ws.Cells(rowNum, 2).Value = user.PrimarySmtpAddress
-                ws.Cells(rowNum, 3).Value = user.JobTitle
-                ws.Cells(rowNum, 4).Value = user.Department
-                ws.Cells(rowNum, 5).Value = user.CompanyName
-                ws.Cells(rowNum, 6).Value = user.OfficeLocation
-                ws.Cells(rowNum, 7).Value = user.BusinessTelephoneNumber
-                ws.Cells(rowNum, 8).Value = user.MobileTelephoneNumber
-                
-                ' Fetch manager details
-                If Not user.Manager Is Nothing Then
-                    ws.Cells(rowNum, 9).Value = user.Manager.Name
-                    ws.Cells(rowNum, 10).Value = user.Manager.PrimarySmtpAddress
-                Else
-                    ws.Cells(rowNum, 9).Value = "N/A"
-                    ws.Cells(rowNum, 10).Value = "N/A"
-                End If
-
-                ' Additional details
-                ws.Cells(rowNum, 11).Value = user.BusinessFaxNumber
-                ws.Cells(rowNum, 12).Value = user.OfficeAddress
-                ws.Cells(rowNum, 13).Value = user.City
-                ws.Cells(rowNum, 14).Value = user.StateOrProvince
-                ws.Cells(rowNum, 15).Value = user.Country
-                ws.Cells(rowNum, 16).Value = user.Alias
-                ws.Cells(rowNum, 17).Value = user.Notes
-
-                ' Increment row number
-                rowNum = rowNum + 1
-                count = count + 1
-                
-                ' Write status update in real-time
-                ws.Cells(1, 18).Value = "Processing: " & count & " records extracted"
-
-                ' **Prevent overload: Add delay (1 second per user)**
-                startTime = Timer
-                Do While Timer < startTime + 1
-                    DoEvents
-                Loop
-            End If
-        End If
-    Next AddressEntry
-
-    ' Autofit columns for better readability
-    ws.Columns("A:R").AutoFit
-
-    ' Final message
-    MsgBox "Export completed! " & count & " Outlook contacts have been saved in Excel.", vbInformation, "Success"
-
-End Sub
+    ws.Cells(1, 17).Value 
