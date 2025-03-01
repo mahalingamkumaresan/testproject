@@ -8,7 +8,6 @@ Sub ExportAllOutlookContactsFast()
     Dim wb As Object
     Dim ws As Object
     Dim rowNum As Long
-    Dim startTime As Double
     Dim NameParts() As String
     Dim FirstName As String
     Dim LastName As String
@@ -79,11 +78,13 @@ Sub ExportAllOutlookContactsFast()
                     LastName = "Unknown"
                 End If
 
-                ' Fix for missing Business Address
+                ' Fix for missing Business Address (Try multiple fields)
+                On Error Resume Next
                 BusinessAddress = user.OfficeAddress
-                If BusinessAddress = "" Then BusinessAddress = user.BusinessAddress
-                If BusinessAddress = "" Then BusinessAddress = user.StreetAddress
-                If BusinessAddress = "" Then BusinessAddress = "Not Available"
+                If BusinessAddress = "" Or IsNull(BusinessAddress) Then BusinessAddress = user.BusinessAddress
+                If BusinessAddress = "" Or IsNull(BusinessAddress) Then BusinessAddress = user.StreetAddress
+                If BusinessAddress = "" Or IsNull(BusinessAddress) Then BusinessAddress = "Not Available"
+                On Error GoTo 0
 
                 ' Store data in array instead of writing cell by cell
                 DataArray(count + 1, 1) = FullName
@@ -141,5 +142,4 @@ Sub ExportAllOutlookContactsFast()
     Set OutlookApp = Nothing
     Set Namespace = Nothing
     Set GAL = Nothing
-'Uupdate
 End Sub
