@@ -52,4 +52,83 @@ Sub ExportAllGALContactsIncrementally()
     ws.Cells(1, 14).Value = "State"
     ws.Cells(1, 15).Value = "Country"
     ws.Cells(1, 16).Value = "Alias"
-    ws.Cells(1, 17).Value 
+    ws.Cells(1, 17).Value = "Notes"
+
+    rowNum = 2 ' Start from row 2
+
+    ' Loop through all Address Entries
+    Dim count As Integer
+    count = 0
+
+    For Each AddressEntry In GAL.AddressEntries
+        If AddressEntry.AddressEntryUserType = 0 Then ' Ensure it's a user
+            Set user = AddressEntry.GetExchangeUser()
+            
+            If Not user Is Nothing Then
+                ' Prevent "Object required" error by using error handling
+                On Error Resume Next
+                ws.Cells(rowNum, 1).Value = user.Name
+                ws.Cells(rowNum, 2).Value = user.PrimarySmtpAddress
+                ws.Cells(rowNum, 3).Value = IIf(user.JobTitle <> "", user.JobTitle, "N/A")
+                ws.Cells(rowNum, 4).Value = IIf(user.Department <> "", user.Department, "N/A")
+                ws.Cells(rowNum, 5).Value = IIf(user.CompanyName <> "", user.CompanyName, "N/A")
+                ws.Cells(rowNum, 6).Value = IIf(user.OfficeLocation <> "", user.OfficeLocation, "N/A")
+                ws.Cells(rowNum, 7).Value = IIf(user.BusinessTelephoneNumber <> "", user.BusinessTelephoneNumber, "N/A")
+                ws.Cells(rowNum, 8).Value = IIf(user.MobileTelephoneNumber <> "", user.MobileTelephoneNumber, "N/A")
+
+                ' Fetch manager details safely
+                If Not user.Manager Is Nothing Then
+                    ws.Cells(rowNum, 9).Value = user.Manager.Name
+                    ws.Cells(rowNum, 10).Value = IIf(user.Manager.PrimarySmtpAddress <> "", user.Manager.PrimarySmtpAddress, "N/A")
+                Else
+                    ws.Cells(rowNum, 9).Value = "N/A"
+                    ws.Cells(rowNum, 10).Value = "N/A"
+                End If
+
+                ' Additional fields (handle empty values safely)
+                ws.Cells(rowNum, 11).Value = IIf(user.BusinessFaxNumber <> "", user.BusinessFaxNumber, "N/A")
+                ws.Cells(rowNum, 12).Value = IIf(user.OfficeAddress <> "", user.OfficeAddress, "N/A")
+                ws.Cells(rowNum, 13).Value = IIf(user.City <> "", user.City, "N/A")
+                ws.Cells(rowNum, 14).Value = IIf(user.StateOrProvince <> "", user.StateOrProvince, "N/A")
+                ws.Cells(rowNum, 15).Value = IIf(user.Country <> "", user.Country, "N/A")
+                ws.Cells(rowNum, 16).Value = IIf(user.Alias <> "", user.Alias, "N/A")
+                ws.Cells(rowNum, 17).Value = IIf(user.Notes <> "", user.Notes, "N/A")
+                On Error GoTo 0 ' Resume normal error handling
+
+                ' Increment row number
+                rowNum = rowNum + 1
+                count = count + 1
+                
+                ' Write status update in real-time
+                ws.Cells(1, 18).Value = "Processing: " & count & " records extracted"
+
+                ' **Prevent overload: Add delay (1 second per user)**
+                startTime = Timer
+                Do While Timer < startTime + 1
+                    DoEvents
+                Loop
+            End If
+        End If
+    Next AddressEntry
+
+    ' Autofit columns for better readability
+    ws.Columns("A:R").AutoFit
+
+    ' Save the workbook
+    Dim filePath As String
+    filePath = "C:\Users\Public\Outlook_GAL_Contacts.xlsx"
+    wb.SaveAs filePath
+    MsgBox "Export completed! " & count & " Outlook contacts have been saved in Excel." & vbCrLf & "File saved at: " & filePath, vbInformation, "Success"
+
+    ' Cleanup
+    wb.Close True ' Close Excel file and save changes
+    ExcelApp.Quit ' Close Excel application
+
+    ' Release memory
+    Set ws = Nothing
+    Set wb = Nothing
+    Set ExcelApp = Nothing
+    Set OutlookApp = Nothing
+    Set Namespace = Nothing
+    Set GAL = Nothing
+End Sub
