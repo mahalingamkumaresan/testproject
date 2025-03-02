@@ -1,113 +1,21 @@
-# PowerShell Script to Extract Global Address List (GAL) from Outlook (No Admin Required)
-param (
-    [string]$OutputPath = "C:\Users\Public\GAL_Contacts.csv",
-    [string]$LogFilePath = "C:\Users\Public\GAL_Export_Log.txt",
-    [int]$BatchSize = 500
-)
+pip install exchangelib pandas
 
-# Initialize Logging
-Start-Transcript -Path $LogFilePath -Append
-Write-Host "Export started at $(Get-Date)" -ForegroundColor Green
+from exchangelib import Credentials, Account
+import pandas as pd
 
-# Open Outlook COM Object
-try {
-    $Outlook = New-Object -ComObject Outlook.Application
-    $Namespace = $Outlook.GetNamespace("MAPI")
-    $GAL = $Namespace.AddressLists | Where-Object { $_.Name -eq "Global Address List" }
-    if (-not $GAL) {
-        Write-Host "ERROR: Global Address List (GAL) not found in Outlook." -ForegroundColor Red
-        Stop-Transcript
-        Exit
-    }
-} catch {
-    Write-Host "ERROR: Unable to access Outlook. Ensure Outlook is installed and configured." -ForegroundColor Red
-    Stop-Transcript
-    Exit
-}
+# Set credentials
+credentials = Credentials("your.email@company.com", "your_password")
 
-# Get Total Record Count
-$TotalRecords = $GAL.AddressEntries.Count
-Write-Host "Total Records Found in GAL: $TotalRecords" -ForegroundColor Cyan
+# Connect to Exchange
+account = Account("your.email@company.com", credentials=credentials, autodiscover=True)
 
-# Prepare CSV Header
-$csvHeader = @('"Full Name","First Name","Last Name","Email","Job Title","Department","Office Location",'
-$csvHeader += '"City","State","Country","Work Phone","Mobile","Manager Name","Direct Reports Count"')
+# Fetch GAL
+contacts = []
+for contact in account.contacts.all():
+    contacts.append([contact.display_name, contact.email_addresses, contact.job_title])
 
-# Write Header to CSV
-$csvHeader | Out-File -FilePath $OutputPath -Encoding UTF8
+# Convert to DataFrame
+df = pd.DataFrame(contacts, columns=["Full Name", "Email", "Job Title"])
+df.to_csv("C:\\Users\\Public\\GAL_EWS.csv", index=False)
 
-# Prepare Data Storage
-$Contacts = @()
-$Counter = 0
-$SkippedRecords = 0
-
-# Function to Escape CSV Values (Handles Commas & Quotes)
-function FormatCSVValue($value) {
-    if ($value -match ',') {
-        return "`"$value`""  # Wrap in double quotes if it contains a comma
-    }
-    return $value
-}
-
-# Fetch GAL Records
-Write-Host "Processing Global Address List... This may take a while." -ForegroundColor Yellow
-foreach ($Entry in $GAL.AddressEntries) {
-    try {
-        # Fetch Exchange User Details
-        $User = $Entry.GetExchangeUser()
-        if (-not $User) { continue }
-
-        # Skip Record if Job Title is Empty
-        if ([string]::IsNullOrEmpty($User.JobTitle)) {
-            $SkippedRecords++
-            continue
-        }
-
-        # Fetch Direct Reports Count
-        $DirectReportsCount = 0
-        if ($User.DirectReports) {
-            $DirectReportsCount = $User.DirectReports.Count
-        }
-
-        # Fetch Manager Name
-        $ManagerName = "N/A"
-        if ($User.Manager) {
-            $Manager = $User.Manager
-            if ($Manager.Name) { $ManagerName = $Manager.Name }
-        }
-
-        # Prepare CSV Row
-        $csvRow = "{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13}" -f `
-            (FormatCSVValue $User.Name), (FormatCSVValue $User.FirstName), (FormatCSVValue $User.LastName), `
-            (FormatCSVValue $User.PrimarySmtpAddress), (FormatCSVValue $User.JobTitle), `
-            (FormatCSVValue $User.Department), (FormatCSVValue $User.OfficeLocation), `
-            (FormatCSVValue $User.City), (FormatCSVValue $User.State), (FormatCSVValue $User.Country), `
-            (FormatCSVValue $User.BusinessTelephoneNumber), (FormatCSVValue $User.MobileTelephoneNumber), `
-            (FormatCSVValue $ManagerName), (FormatCSVValue $DirectReportsCount)
-
-        $Contacts += $csvRow
-        $Counter++
-
-        # Batch Write to CSV
-        if ($Counter % $BatchSize -eq 0) {
-            $Contacts | Out-File -FilePath $OutputPath -Append -Encoding UTF8
-            $Contacts = @()  # Clear Batch
-            Write-Host "Processed $Counter/$TotalRecords records... (Skipped: $SkippedRecords)" -ForegroundColor Yellow
-        }
-    } catch {
-        # Log Errors
-        Write-Host "Error processing record: $($_.Exception.Message)" -ForegroundColor Red
-        Add-Content -Path $LogFilePath -Value "Error processing record: $($_.Exception.Message)"
-    }
-}
-
-# Write Remaining Records
-if ($Contacts.Count -gt 0) {
-    $Contacts | Out-File -FilePath $OutputPath -Append -Encoding UTF8
-}
-
-# Completion Message
-Write-Host "Export completed successfully! Data saved to $OutputPath" -ForegroundColor Green
-Write-Host "Total Records Processed: $Counter | Skipped Records: $SkippedRecords" -ForegroundColor Cyan
-Add-Content -Path $LogFilePath -Value "Total Records Processed: $Counter | Skipped Records: $SkippedRecords"
-Stop-Transcript
+print("Export Completed!")
