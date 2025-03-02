@@ -21,11 +21,11 @@ except Exception as e:
 # Character set to iterate over GAL efficiently
 search_prefixes = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@._")
 
-# Function to safely extract a value from a tuple or nested object
-def safe_extract(obj, attr, default="N/A"):
-    """Safely extract an attribute from an object or return default value if missing."""
+# Function to safely extract a value from user[1] or return default
+def safe_extract(user, attr, default="N/A"):
+    """Safely extract an attribute from user[1] or return default if missing."""
     try:
-        return getattr(obj, attr) if hasattr(obj, attr) and getattr(obj, attr) else default
+        return getattr(user[1], attr) if hasattr(user[1], attr) and getattr(user[1], attr) else default
     except:
         return default
 
@@ -38,22 +38,22 @@ def fetch_contacts(prefix):
         contacts = []
 
         for user in resolved_names:
-            if user:
+            if user and isinstance(user, tuple) and len(user) > 1:  # Ensure user[1] exists
                 job_title = safe_extract(user, "job_title", "").strip()
 
                 # ✅ Skip contacts where Job Title is empty
                 if not job_title:
                     continue  
 
-                # Extract fields based on Exchange data format
+                # Extract fields based on Exchange data format (using user[1])
                 full_name = safe_extract(user, "display_name")
                 first_name = safe_extract(user, "given_name")
                 last_name = safe_extract(user, "surname")
 
-                # ✅ Extract email from nested EmailAddress tuple
+                # ✅ Extract email from EmailAddress tuple inside user[1]
                 email = "N/A"
-                if hasattr(user, "email_addresses") and isinstance(user.email_addresses, tuple):
-                    for email_obj in user.email_addresses:
+                if hasattr(user[1], "email_addresses") and isinstance(user[1].email_addresses, tuple):
+                    for email_obj in user[1].email_addresses:
                         if hasattr(email_obj, "email"):
                             email = email_obj.email
                             break  # Get only the first available email
@@ -63,8 +63,8 @@ def fetch_contacts(prefix):
 
                 # ✅ Extract address details from PhysicalAddress tuple
                 city, state, country = "N/A", "N/A", "N/A"
-                if hasattr(user, "physical_addresses") and isinstance(user.physical_addresses, tuple):
-                    for address in user.physical_addresses:
+                if hasattr(user[1], "physical_addresses") and isinstance(user[1].physical_addresses, tuple):
+                    for address in user[1].physical_addresses:
                         if hasattr(address, "label") and address.label == "Business":
                             city = safe_extract(address, "city")
                             state = safe_extract(address, "state")
@@ -72,8 +72,8 @@ def fetch_contacts(prefix):
 
                 # ✅ Extract phone numbers from PhoneNumber tuple
                 work_phone, mobile = "N/A", "N/A"
-                if hasattr(user, "phone_numbers") and isinstance(user.phone_numbers, tuple):
-                    for phone in user.phone_numbers:
+                if hasattr(user[1], "phone_numbers") and isinstance(user[1].phone_numbers, tuple):
+                    for phone in user[1].phone_numbers:
                         if hasattr(phone, "label") and phone.label == "BusinessPhone":
                             work_phone = safe_extract(phone, "phone_number")
                         elif hasattr(phone, "label") and phone.label == "MobilePhone":
@@ -81,13 +81,13 @@ def fetch_contacts(prefix):
 
                 # ✅ Extract manager name
                 manager = "N/A"
-                if hasattr(user, "manager") and user.manager:
-                    manager = safe_extract(user.manager, "name")
+                if hasattr(user[1], "manager") and user[1].manager:
+                    manager = safe_extract(user[1].manager, "name")
 
                 # ✅ Count direct reports
                 direct_reports_count = 0
-                if hasattr(user, "direct_reports") and isinstance(user.direct_reports, tuple):
-                    direct_reports_count = len(user.direct_reports)
+                if hasattr(user[1], "direct_reports") and isinstance(user[1].direct_reports, tuple):
+                    direct_reports_count = len(user[1].direct_reports)
 
                 contacts.append([
                     full_name, first_name, last_name, email, job_title, department, office_location,
