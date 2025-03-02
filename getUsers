@@ -21,11 +21,11 @@ except Exception as e:
 # Character set to iterate over GAL efficiently
 search_prefixes = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@._")
 
-# Function to safely extract a value from user[1] or return default
-def safe_extract(user, attr, default="N/A"):
-    """Safely extract an attribute from user[1] or return default if missing."""
+# ✅ Fixed: safe_extract now takes user object, index, and attribute name
+def safe_extract(user, index, attr, default="N/A"):
+    """Safely extract an attribute from user[index] or return default if missing."""
     try:
-        return getattr(user[1], attr) if hasattr(user[1], attr) and getattr(user[1], attr) else default
+        return getattr(user[index], attr) if hasattr(user[index], attr) and getattr(user[index], attr) else default
     except:
         return default
 
@@ -39,52 +39,44 @@ def fetch_contacts(prefix):
 
         for user in resolved_names:
             if user and isinstance(user, tuple) and len(user) > 1:  # Ensure user[1] exists
-                job_title = safe_extract(user, "job_title", "").strip()
+                job_title = safe_extract(user, 1, "job_title").strip()
 
                 # ✅ Skip contacts where Job Title is empty
                 if not job_title:
                     continue  
 
-                # Extract fields based on Exchange data format (using user[1])
-                full_name = safe_extract(user, "display_name")
-                first_name = safe_extract(user, "given_name")
-                last_name = safe_extract(user, "surname")
+                # ✅ Extract Email from `user[0].email_address` (inside Mailbox)
+                email = safe_extract(user, 0, "email_address")
 
-                # ✅ Extract email from EmailAddress tuple inside user[1]
-                email = "N/A"
-                if hasattr(user[1], "email_addresses") and isinstance(user[1].email_addresses, tuple):
-                    for email_obj in user[1].email_addresses:
-                        if hasattr(email_obj, "email"):
-                            email = email_obj.email
-                            break  # Get only the first available email
+                # ✅ Extract Other Fields from `user[1]`
+                full_name = safe_extract(user, 1, "display_name")
+                first_name = safe_extract(user, 1, "given_name")
+                last_name = safe_extract(user, 1, "surname")
+                department = safe_extract(user, 1, "department")
+                office_location = safe_extract(user, 1, "office_location")
 
-                department = safe_extract(user, "department")
-                office_location = safe_extract(user, "office")
-
-                # ✅ Extract address details from PhysicalAddress tuple
+                # ✅ Extract Address (City, State, Country) from `user[1].physical_addresses`
                 city, state, country = "N/A", "N/A", "N/A"
                 if hasattr(user[1], "physical_addresses") and isinstance(user[1].physical_addresses, tuple):
                     for address in user[1].physical_addresses:
                         if hasattr(address, "label") and address.label == "Business":
-                            city = safe_extract(address, "city")
-                            state = safe_extract(address, "state")
-                            country = safe_extract(address, "country")
+                            city = safe_extract(address, 0, "city")
+                            state = safe_extract(address, 0, "state")
+                            country = safe_extract(address, 0, "country")
 
-                # ✅ Extract phone numbers from PhoneNumber tuple
+                # ✅ Extract Phone Numbers (Work & Mobile) from `user[1].phone_numbers`
                 work_phone, mobile = "N/A", "N/A"
                 if hasattr(user[1], "phone_numbers") and isinstance(user[1].phone_numbers, tuple):
                     for phone in user[1].phone_numbers:
                         if hasattr(phone, "label") and phone.label == "BusinessPhone":
-                            work_phone = safe_extract(phone, "phone_number")
+                            work_phone = safe_extract(phone, 0, "phone_number")
                         elif hasattr(phone, "label") and phone.label == "MobilePhone":
-                            mobile = safe_extract(phone, "phone_number")
+                            mobile = safe_extract(phone, 0, "phone_number")
 
-                # ✅ Extract manager name
-                manager = "N/A"
-                if hasattr(user[1], "manager") and user[1].manager:
-                    manager = safe_extract(user[1].manager, "name")
+                # ✅ Extract Manager Name from `user[1].manager`
+                manager = safe_extract(user, 1, "manager")
 
-                # ✅ Count direct reports
+                # ✅ Count Direct Reports from `user[1].direct_reports`
                 direct_reports_count = 0
                 if hasattr(user[1], "direct_reports") and isinstance(user[1].direct_reports, tuple):
                     direct_reports_count = len(user[1].direct_reports)
