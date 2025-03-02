@@ -1,29 +1,79 @@
-# PowerShell script to extract Global Address List (GAL) data via Outlook
-$OutputPath = "C:\Users\Public\GAL_Contacts.csv"
+Install-Module -Name ImportExcel -Scope CurrentUser
+# PowerShell Script to Extract Global Address List (GAL) with Multi-Threading
+param (
+    [string]$OutputPath = "C:\Users\Public\GAL_Contacts.xlsx",
+    [string]$LogFilePath = "C:\Users\Public\GAL_Export_Log.txt",
+    [int]$BatchSize = 1000
+)
 
-# Open Outlook COM object
-$outlook = New-Object -ComObject Outlook.Application
-$namespace = $outlook.GetNamespace("MAPI")
-$gal = $namespace.AddressLists | Where-Object { $_.Name -eq "Global Address List" }
+# Import Required Module
+Import-Module ActiveDirectory
+Import-Module ImportExcel
 
-# Prepare CSV data
+# Initialize Logging
+Start-Transcript -Path $LogFilePath -Append
+Write-Host "Export started at $(Get-Date)" -ForegroundColor Green
+
+# Get the Total Count of GAL Records
+Write-Host "Fetching total count of Global Address List records..."
+$TotalRecords = (Get-ADUser -Filter *).Count
+Write-Host "Total Records Found: $TotalRecords" -ForegroundColor Cyan
+
+# Prepare Data Storage
 $contacts = @()
-foreach ($entry in $gal.AddressEntries) {
-    $user = $entry.GetExchangeUser()
-    if ($user) {
-        $contacts += [PSCustomObject]@{
-            FullName = $user.Name
-            Email = $user.PrimarySmtpAddress
-            JobTitle = $user.JobTitle
-            Department = $user.Department
-            WorkPhone = $user.BusinessTelephoneNumber
-            Mobile = $user.MobileTelephoneNumber
-            OfficeLocation = $user.OfficeLocation
-            Manager = if ($user.Manager) { $user.Manager.Name } else { "N/A" }
-        }
+$Counter = 0
+
+# Multi-Threading Setup (Parallel Processing)
+$MaxThreads = 8
+$Jobs = @()
+
+Write-Host "Starting parallel processing with $MaxThreads threads..." -ForegroundColor Green
+
+# Fetch AD User Data with Multi-Threading
+$Users = Get-ADUser -Filter * -Properties DisplayName, GivenName, Surname, Mail, Title, Department, `
+    Office, City, State, Country, Manager, TelephoneNumber, MobilePhone, DirectReports
+
+$Users | ForEach-Object -Parallel {
+    $user = $_
+    $ManagerEmail = if ($user.Manager) { (Get-ADUser $user.Manager).Mail } else { "N/A" }
+    $DirectReportsCount = if ($user.DirectReports) { $user.DirectReports.Count } else { 0 }
+
+    # Collect User Data
+    [PSCustomObject]@{
+        FullName = $user.DisplayName
+        FirstName = $user.GivenName
+        LastName = $user.Surname
+        Email = $user.Mail
+        JobTitle = $user.Title
+        Department = $user.Department
+        OfficeLocation = $user.Office
+        City = $user.City
+        State = $user.State
+        Country = $user.Country
+        WorkPhone = $user.TelephoneNumber
+        Mobile = $user.MobilePhone
+        ManagerEmail = $ManagerEmail
+        DirectReportsCount = $DirectReportsCount
     }
+
+} -AsJob -ThrottleLimit $MaxThreads | ForEach-Object { $Jobs += $_ }
+
+# Monitor Job Completion
+Write-Host "Processing records... This may take a while." -ForegroundColor Yellow
+while ($Jobs | Where-Object { $_.State -eq "Running" }) {
+    Write-Host "Processed $Counter/$TotalRecords records..."
+    Start-Sleep -Seconds 10
+    $Counter += $BatchSize
 }
 
-# Export to CSV
-$contacts | Export-Csv -Path $OutputPath -NoTypeInformation
-Write-Host "Export completed! Data saved to $OutputPath"
+# Retrieve Job Results
+$contacts = $Jobs | ForEach-Object { Receive-Job -Job $_ }
+$Jobs | Remove-Job
+
+# Export to Excel
+Write-Host "Writing results to Excel..." -ForegroundColor Cyan
+$contacts | Export-Excel -Path $OutputPath -WorksheetName "GAL_Contacts" -AutoSize -TableStyle Medium2
+
+# Completion Message
+Write-Host "Export completed successfully! Data saved to $OutputPath" -ForegroundColor Green
+Stop-Transcript
