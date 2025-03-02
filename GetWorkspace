@@ -3,18 +3,22 @@ import pandas as pd
 import os
 import logging
 import time
+import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- CONFIGURATION ---
-BASE_DIR = r"C:\RiskPortal\GetRepos"  # Input & Output Directory
-INPUT_FILE = os.path.join(BASE_DIR, "CI.xlsx")  # Excel file containing SPK column
-OUTPUT_FILE = os.path.join(BASE_DIR, "Bitbucket_Repositories.xlsx")  # Output file
+BASE_DIR = r"C:\RiskPortal\GetRepos"  # Base directory for input/output
+INPUT_FILE = os.path.join(BASE_DIR, "CI.xlsx")  # Input file containing SPK column
+OUTPUT_FILE = os.path.join(BASE_DIR, "Bitbucket_Repositories.xlsx")  # Output Excel file
 LOG_FILE = os.path.join(BASE_DIR, "bitbucket_fetch.log")  # Log file
 
 # Bitbucket API Credentials
-BITBUCKET_URL = "https://api.bitbucket.org/2.0/repositories"
-USERNAME = "your_username"  # Replace with your Bitbucket username
-APP_PASSWORD = "your_app_password"  # Replace with your Bitbucket app password
+BITBUCKET_URL = "https://api.bitbucket.org/2.0"
+USERNAME = "your_username"  # Replace with Bitbucket username
+APP_PASSWORD = "your_app_password"  # Replace with Bitbucket app password
+
+# --- SUPPRESS WARNINGS ---
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- SETUP LOGGING ---
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO, 
@@ -22,20 +26,20 @@ logging.basicConfig(filename=LOG_FILE, level=logging.INFO,
 
 # --- FUNCTION TO VALIDATE API ACCESS ---
 def validate_api_access():
-    """Validates user access to the Bitbucket API before making bulk requests."""
-    test_url = f"{BITBUCKET_URL}?pagelen=1"
+    """Validates API access before making bulk repository requests."""
+    test_url = f"{BITBUCKET_URL}/projects?pagelen=1"
     try:
-        response = requests.get(test_url, auth=(USERNAME, APP_PASSWORD))
+        response = requests.get(test_url, auth=(USERNAME, APP_PASSWORD), verify=False)
         if response.status_code == 200:
-            logging.info("API validation successful.")
+            logging.info("✅ API validation successful.")
             print("✅ API access validated successfully.")
             return True
         else:
-            logging.error(f"API validation failed: {response.status_code} - {response.text}")
+            logging.error(f"❌ API validation failed: {response.status_code} - {response.text}")
             print(f"❌ API validation failed. Check {LOG_FILE} for details.")
             return False
     except requests.exceptions.RequestException as e:
-        logging.error(f"API validation error: {e}")
+        logging.error(f"❌ API validation error: {e}")
         print(f"❌ API validation error. Check {LOG_FILE} for details.")
         return False
 
@@ -43,16 +47,16 @@ def validate_api_access():
 def fetch_repositories(spk):
     """
     Fetches all repositories for a given SPK (project key) from Bitbucket API.
-    Handles pagination to get all results.
+    Handles pagination using `/projects/{spk}/repos?limit=1000`.
     """
-    url = f"{BITBUCKET_URL}?q=project.key=\"{spk}\"&pagelen=100"
+    url = f"{BITBUCKET_URL}/projects/{spk}/repos?limit=1000"
     repositories = []
     failure_count = 0
 
     while url:
         try:
-            response = requests.get(url, auth=(USERNAME, APP_PASSWORD))
-            response.raise_for_status()  # Raise an error for bad responses
+            response = requests.get(url, auth=(USERNAME, APP_PASSWORD), verify=False)
+            response.raise_for_status()  # Raise an error if request fails
             data = response.json()
 
             # Extract repository information
@@ -74,13 +78,14 @@ def fetch_repositories(spk):
                     "Repo URL": repo.get("links", {}).get("html", {}).get("href", "N/A"),
                 })
 
-            # Check for pagination
+            # Handle pagination
             url = data.get("next", None)
             time.sleep(1)  # Respect API rate limits
 
         except requests.exceptions.RequestException as e:
             failure_count += 1
-            logging.error(f"Failed to fetch repositories for SPK: {spk} - {e}")
+            logging.error(f"❌ Failed to fetch repositories for SPK: {spk} - {e}")
+            break
 
     return repositories, failure_count
 
@@ -109,7 +114,7 @@ def main():
                     total_failures += failures
                     print(f"✅ Completed SPK: {spk} | Repos: {len(repos)} | Failures: {failures}")
                 except Exception as e:
-                    logging.error(f"Unexpected error for SPK {spk}: {e}")
+                    logging.error(f"❌ Unexpected error for SPK {spk}: {e}")
                     total_failures += 1
 
         # Save results to Excel
@@ -119,11 +124,11 @@ def main():
             print(f"✅ Repository data saved to {OUTPUT_FILE}")
 
         # Log total failures
-        logging.info(f"Total failures: {total_failures}")
+        logging.info(f"⚠️ Total failures: {total_failures}")
         print(f"⚠️ Total failures logged: {total_failures}")
 
     except Exception as e:
-        logging.error(f"Unexpected error in main: {e}")
+        logging.error(f"❌ Unexpected error in main: {e}")
         print("❌ An error occurred. Check the log file for details.")
 
 if __name__ == "__main__":
