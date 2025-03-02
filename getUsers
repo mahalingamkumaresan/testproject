@@ -2,6 +2,7 @@ import concurrent.futures
 from exchangelib import Credentials, Account
 import pandas as pd
 import time
+import string
 
 # Set your Exchange credentials
 EMAIL = "your.email@company.com"
@@ -19,74 +20,77 @@ except Exception as e:
     exit()
 
 # Character set to iterate over GAL efficiently
-search_prefixes = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@._")
+search_prefixes = list(string.ascii_uppercase + "0123456789@._")
 
-# ✅ Fixed: safe_extract now takes user object, index, and attribute name
-def safe_extract(user, index, attr, default="N/A"):
-    """Safely extract an attribute from user[index] or return default if missing."""
+# ✅ Function to recursively fetch contacts if more than 100 exist per query
+def fetch_contacts(prefix, depth=1):
+    """Recursively fetch contacts by refining the search query if needed."""
     try:
-        return getattr(user[index], attr) if hasattr(user[index], attr) and getattr(user[index], attr) else default
-    except:
-        return default
-
-# Function to fetch GAL contacts in batches
-def fetch_contacts(prefix):
-    try:
-        print(f"📌 Fetching contacts starting with: {prefix}* ...")
-
-        resolved_names = account.protocol.resolve_names(prefix + "*", return_full_contact_data=True)
         contacts = []
+        query = prefix + "*"
+
+        print(f"📌 Fetching contacts starting with: {query} ...")
+        resolved_names = account.protocol.resolve_names(query, return_full_contact_data=True)
+
+        if not resolved_names:
+            return []
 
         for user in resolved_names:
             if user and isinstance(user, tuple) and len(user) > 1:  # Ensure user[1] exists
-                job_title = safe_extract(user, 1, "job_title").strip()
+                job_title = user[1].job_title if hasattr(user[1], "job_title") else ""
 
                 # ✅ Skip contacts where Job Title is empty
-                if not job_title:
+                if not job_title.strip():
                     continue  
 
                 # ✅ Extract Email from `user[0].email_address` (inside Mailbox)
-                email = safe_extract(user, 0, "email_address")
+                email = user[0].email_address if hasattr(user[0], "email_address") else "N/A"
 
                 # ✅ Extract Other Fields from `user[1]`
-                full_name = safe_extract(user, 1, "display_name")
-                first_name = safe_extract(user, 1, "given_name")
-                last_name = safe_extract(user, 1, "surname")
-                department = safe_extract(user, 1, "department")
-                office_location = safe_extract(user, 1, "office_location")
+                full_name = user[1].display_name if hasattr(user[1], "display_name") else "N/A"
+                first_name = user[1].given_name if hasattr(user[1], "given_name") else "N/A"
+                last_name = user[1].surname if hasattr(user[1], "surname") else "N/A"
+                department = user[1].department if hasattr(user[1], "department") else "N/A"
+                office_location = user[1].office_location if hasattr(user[1], "office_location") else "N/A"
 
                 # ✅ Extract Address (City, State, Country) from `user[1].physical_addresses`
                 city, state, country = "N/A", "N/A", "N/A"
                 if hasattr(user[1], "physical_addresses") and isinstance(user[1].physical_addresses, tuple):
                     for address in user[1].physical_addresses:
                         if hasattr(address, "label") and address.label == "Business":
-                            city = safe_extract(address, 0, "city")
-                            state = safe_extract(address, 0, "state")
-                            country = safe_extract(address, 0, "country")
+                            city = address.city if hasattr(address, "city") else "N/A"
+                            state = address.state if hasattr(address, "state") else "N/A"
+                            country = address.country if hasattr(address, "country") else "N/A"
 
                 # ✅ Extract Phone Numbers (Work & Mobile) from `user[1].phone_numbers`
                 work_phone, mobile = "N/A", "N/A"
                 if hasattr(user[1], "phone_numbers") and isinstance(user[1].phone_numbers, tuple):
                     for phone in user[1].phone_numbers:
                         if hasattr(phone, "label") and phone.label == "BusinessPhone":
-                            work_phone = safe_extract(phone, 0, "phone_number")
+                            work_phone = phone.phone_number if hasattr(phone, "phone_number") else "N/A"
                         elif hasattr(phone, "label") and phone.label == "MobilePhone":
-                            mobile = safe_extract(phone, 0, "phone_number")
+                            mobile = phone.phone_number if hasattr(phone, "phone_number") else "N/A"
 
                 # ✅ Extract Manager Name from `user[1].manager`
-                manager = safe_extract(user, 1, "manager")
+                manager = user[1].manager.name if hasattr(user[1], "manager") and user[1].manager else "N/A"
 
                 # ✅ Count Direct Reports from `user[1].direct_reports`
-                direct_reports_count = 0
-                if hasattr(user[1], "direct_reports") and isinstance(user[1].direct_reports, tuple):
-                    direct_reports_count = len(user[1].direct_reports)
+                direct_reports_count = len(user[1].direct_reports) if hasattr(user[1], "direct_reports") and isinstance(user[1].direct_reports, tuple) else 0
 
                 contacts.append([
                     full_name, first_name, last_name, email, job_title, department, office_location,
                     city, state, country, work_phone, mobile, manager, direct_reports_count
                 ])
-        
-        print(f"✅ Completed: {prefix}* - {len(contacts)} valid contacts (Job Title Required)")
+
+        print(f"✅ Completed: {query} - {len(contacts)} valid contacts (Job Title Required)")
+
+        # ✅ If exactly 100 results were returned, we need more refined queries
+        if len(resolved_names) == 100 and depth < 3:  # Limit depth to prevent infinite loops
+            for letter in string.ascii_uppercase:  # A-Z
+                contacts += fetch_contacts(prefix + letter, depth + 1)
+            for digit in "0123456789":  # 0-9
+                contacts += fetch_contacts(prefix + digit, depth + 1)
+
         return contacts
 
     except Exception as e:
