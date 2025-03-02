@@ -1,79 +1,100 @@
-Install-Module -Name ImportExcel -Scope CurrentUser
-# PowerShell Script to Extract Global Address List (GAL) with Multi-Threading
+# PowerShell Script to Export Global Address List (GAL) Data to CSV
 param (
-    [string]$OutputPath = "C:\Users\Public\GAL_Contacts.xlsx",
+    [string]$OutputPath = "C:\Users\Public\GAL_Contacts.csv",
     [string]$LogFilePath = "C:\Users\Public\GAL_Export_Log.txt",
     [int]$BatchSize = 1000
 )
-
-# Import Required Module
-Import-Module ActiveDirectory
-Import-Module ImportExcel
 
 # Initialize Logging
 Start-Transcript -Path $LogFilePath -Append
 Write-Host "Export started at $(Get-Date)" -ForegroundColor Green
 
-# Get the Total Count of GAL Records
+# Ensure Active Directory Module is Available
+if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
+    Write-Host "ERROR: Active Directory module is not installed. Exiting..." -ForegroundColor Red
+    Stop-Transcript
+    Exit
+}
+
+# Get Total Record Count
 Write-Host "Fetching total count of Global Address List records..."
 $TotalRecords = (Get-ADUser -Filter *).Count
 Write-Host "Total Records Found: $TotalRecords" -ForegroundColor Cyan
 
+# Prepare CSV Header
+$csvHeader = @('"Full Name","First Name","Last Name","Email","Job Title","Department","Office Location",'
+$csvHeader += '"City","State","Country","Work Phone","Mobile","Manager Email","Direct Reports Count"')
+
+# Write Header to CSV File
+$csvHeader | Out-File -FilePath $OutputPath -Encoding UTF8
+
 # Prepare Data Storage
 $contacts = @()
 $Counter = 0
+$SkippedRecords = 0
 
-# Multi-Threading Setup (Parallel Processing)
-$MaxThreads = 8
-$Jobs = @()
-
-Write-Host "Starting parallel processing with $MaxThreads threads..." -ForegroundColor Green
-
-# Fetch AD User Data with Multi-Threading
+# Fetch AD User Data in Batches
 $Users = Get-ADUser -Filter * -Properties DisplayName, GivenName, Surname, Mail, Title, Department, `
     Office, City, State, Country, Manager, TelephoneNumber, MobilePhone, DirectReports
 
-$Users | ForEach-Object -Parallel {
-    $user = $_
-    $ManagerEmail = if ($user.Manager) { (Get-ADUser $user.Manager).Mail } else { "N/A" }
-    $DirectReportsCount = if ($user.DirectReports) { $user.DirectReports.Count } else { 0 }
+# Process Each Record
+foreach ($user in $Users) {
+    try {
+        # Skip Record if Job Title is Empty
+        if ([string]::IsNullOrEmpty($user.Title)) {
+            $SkippedRecords++
+            continue
+        }
 
-    # Collect User Data
-    [PSCustomObject]@{
-        FullName = $user.DisplayName
-        FirstName = $user.GivenName
-        LastName = $user.Surname
-        Email = $user.Mail
-        JobTitle = $user.Title
-        Department = $user.Department
-        OfficeLocation = $user.Office
-        City = $user.City
-        State = $user.State
-        Country = $user.Country
-        WorkPhone = $user.TelephoneNumber
-        Mobile = $user.MobilePhone
-        ManagerEmail = $ManagerEmail
-        DirectReportsCount = $DirectReportsCount
+        # Fetch Manager Email
+        $ManagerEmail = "N/A"
+        if ($user.Manager) {
+            $Manager = Get-ADUser -Identity $user.Manager -Properties Mail
+            if ($Manager.Mail) { $ManagerEmail = $Manager.Mail }
+        }
+
+        # Count Direct Reports
+        $DirectReportsCount = if ($user.DirectReports) { $user.DirectReports.Count } else { 0 }
+
+        # Escape Quotes and Commas by Encapsulating in Double Quotes
+        function FormatCSVValue($value) {
+            if ($value -match ',') {
+                return "`"$value`""  # Wrap in double quotes if it contains a comma
+            }
+            return $value
+        }
+
+        # Store Data in CSV Format
+        $csvRow = "{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13}" -f `
+            (FormatCSVValue $user.DisplayName), (FormatCSVValue $user.GivenName), (FormatCSVValue $user.Surname), `
+            (FormatCSVValue $user.Mail), (FormatCSVValue $user.Title), (FormatCSVValue $user.Department), `
+            (FormatCSVValue $user.Office), (FormatCSVValue $user.City), (FormatCSVValue $user.State), `
+            (FormatCSVValue $user.Country), (FormatCSVValue $user.TelephoneNumber), (FormatCSVValue $user.MobilePhone), `
+            (FormatCSVValue $ManagerEmail), (FormatCSVValue $DirectReportsCount)
+
+        $contacts += $csvRow
+
+        # Batch Write to CSV
+        $Counter++
+        if ($Counter % $BatchSize -eq 0) {
+            $contacts | Out-File -FilePath $OutputPath -Append -Encoding UTF8
+            $contacts = @()  # Clear Batch
+            Write-Host "Processed $Counter/$TotalRecords records... (Skipped: $SkippedRecords)" -ForegroundColor Yellow
+        }
+    } catch {
+        # Log Errors
+        Write-Host "Error processing record: $($_.Exception.Message)" -ForegroundColor Red
+        Add-Content -Path $LogFilePath -Value "Error processing record: $($_.Exception.Message)"
     }
-
-} -AsJob -ThrottleLimit $MaxThreads | ForEach-Object { $Jobs += $_ }
-
-# Monitor Job Completion
-Write-Host "Processing records... This may take a while." -ForegroundColor Yellow
-while ($Jobs | Where-Object { $_.State -eq "Running" }) {
-    Write-Host "Processed $Counter/$TotalRecords records..."
-    Start-Sleep -Seconds 10
-    $Counter += $BatchSize
 }
 
-# Retrieve Job Results
-$contacts = $Jobs | ForEach-Object { Receive-Job -Job $_ }
-$Jobs | Remove-Job
-
-# Export to Excel
-Write-Host "Writing results to Excel..." -ForegroundColor Cyan
-$contacts | Export-Excel -Path $OutputPath -WorksheetName "GAL_Contacts" -AutoSize -TableStyle Medium2
+# Write Remaining Records
+if ($contacts.Count -gt 0) {
+    $contacts | Out-File -FilePath $OutputPath -Append -Encoding UTF8
+}
 
 # Completion Message
 Write-Host "Export completed successfully! Data saved to $OutputPath" -ForegroundColor Green
+Write-Host "Total Records Processed: $Counter | Skipped Records: $SkippedRecords" -ForegroundColor Cyan
+Add-Content -Path $LogFilePath -Value "Total Records Processed: $Counter | Skipped Records: $SkippedRecords"
 Stop-Transcript
