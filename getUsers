@@ -9,6 +9,9 @@ import re  # Used to extract Standard ID
 EMAIL = "your.email@company.com"
 PASSWORD = "your_password"
 
+# Log file for skipped entries
+SKIP_LOG_FILE = "C:\\Users\\Public\\GAL_Skipped_Entries.log"
+
 # Connect to Exchange
 try:
     print("Connecting to Exchange...")
@@ -25,12 +28,19 @@ search_prefixes = list(string.ascii_uppercase + "0123456789@._")
 
 # Function to extract Standard ID from name format "LastName, FirstName STANDARDID"
 def extract_standard_id(name):
-    if name:
+    if name and isinstance(name, str):
         match = re.search(r'\b(\w+)$', name)  # Extracts last word (Standard ID)
         return match.group(1) if match else "N/A"
     return "N/A"
 
-# Function to fetch contacts in batches (handles pagination)
+# ✅ Function to log skipped entries with reason
+def log_skipped(reason, query, user_data="N/A"):
+    message = f"⚠️ Skipping entry for {query}: {reason} | Data: {user_data}"
+    print(message)  # Print to console
+    with open(SKIP_LOG_FILE, "a", encoding="utf-8") as log_file:
+        log_file.write(message + "\n")  # Log to file
+
+# ✅ Function to fetch contacts while handling errors properly
 def fetch_contacts(prefix, depth=1):
     """Recursively fetch contacts by refining the search query if needed."""
     try:
@@ -44,86 +54,75 @@ def fetch_contacts(prefix, depth=1):
             return []
 
         for user in resolved_names:
-            if user and isinstance(user, tuple) and len(user) > 1:  # Ensure user[1] exists
-                job_title = user[1].job_title if hasattr(user[1], "job_title") else ""
+            if not isinstance(user, tuple) or len(user) < 2:
+                log_skipped("Invalid user tuple structure", query, user)
+                continue
 
-                # ✅ Skip contacts where Job Title is empty
-                if not job_title.strip():
-                    continue  
+            if not hasattr(user[0], "name") or not hasattr(user[1], "display_name"):
+                log_skipped("Missing Mailbox or Contact attributes", query, user)
+                continue
 
-                # ✅ Extract Email from `user[0].email_address` (inside Mailbox)
-                email = user[0].email_address if hasattr(user[0], "email_address") else "N/A"
+            job_title = user[1].job_title if hasattr(user[1], "job_title") else ""
 
-                # ✅ Extract Display Name (Removing First/Last Name from Output)
-                display_name = user[1].display_name if hasattr(user[1], "display_name") else "N/A"
+            if not job_title.strip():
+                log_skipped("Job Title is empty", query, user[1].display_name)
+                continue  
 
-                # ✅ Extract Standard ID from `user[0].name`
-                standard_id = extract_standard_id(user[0].name) if hasattr(user[0], "name") else "N/A"
+            email = user[0].email_address if hasattr(user[0], "email_address") else "N/A"
+            display_name = user[1].display_name if hasattr(user[1], "display_name") else "N/A"
+            standard_id = extract_standard_id(user[0].name) if hasattr(user[0], "name") else "N/A"
 
-                # ✅ Extract Job Title, Department, Office Location
-                department = user[1].department if hasattr(user[1], "department") else "N/A"
-                office_location = user[1].office_location if hasattr(user[1], "office_location") else "N/A"
+            # ✅ Extract Job Title, Department (Office Location & Phone Numbers Removed)
+            department = user[1].department if hasattr(user[1], "department") else "N/A"
 
-                # ✅ Extract Address (City, Country, Zip) from `user[1].physical_addresses[0]`
-                city, country, zip_code = "N/A", "N/A", "N/A"
-                if hasattr(user[1], "physical_addresses") and isinstance(user[1].physical_addresses, tuple) and len(user[1].physical_addresses) > 0:
-                    address = user[1].physical_addresses[0]  # Use first address
-                    city = address.city if hasattr(address, "city") else "N/A"
-                    country = address.country if hasattr(address, "country") else "N/A"
-                    zip_code = address.zipcode if hasattr(address, "zipcode") else "N/A"
+            # ✅ Extract Address (City, Country, Zip) from `user[1].physical_addresses[0]`
+            city, country, zip_code = "N/A", "N/A", "N/A"
+            if hasattr(user[1], "physical_addresses") and isinstance(user[1].physical_addresses, tuple) and len(user[1].physical_addresses) > 0:
+                address = user[1].physical_addresses[0]
+                city = address.city if hasattr(address, "city") else "N/A"
+                country = address.country if hasattr(address, "country") else "N/A"
+                zip_code = address.zipcode if hasattr(address, "zipcode") else "N/A"
 
-                # ✅ Extract Phone Numbers (Work & Mobile) from `user[1].phone_numbers`
-                work_phone, mobile = "N/A", "N/A"
-                if hasattr(user[1], "phone_numbers") and isinstance(user[1].phone_numbers, tuple):
-                    for phone in user[1].phone_numbers:
-                        if hasattr(phone, "label") and phone.label == "BusinessPhone":
-                            work_phone = phone.phone_number if hasattr(phone, "phone_number") else "N/A"
-                        elif hasattr(phone, "label") and phone.label == "MobilePhone":
-                            mobile = phone.phone_number if hasattr(phone, "phone_number") else "N/A"
+            # ✅ Extract Manager Name and Manager Standard ID
+            manager_name = user[1].manager.name if hasattr(user[1], "manager") and user[1].manager else "N/A"
+            manager_standard_id = extract_standard_id(manager_name)
 
-                # ✅ Extract Manager Name and Manager Standard ID
-                manager_name = user[1].manager.name if hasattr(user[1], "manager") and user[1].manager else "N/A"
-                manager_standard_id = extract_standard_id(manager_name)
+            # ✅ Count Direct Reports
+            direct_reports_count = len(user[1].direct_reports) if hasattr(user[1], "direct_reports") and isinstance(user[1].direct_reports, tuple) else 0
 
-                # ✅ Count Direct Reports from `user[1].direct_reports`
-                direct_reports_count = len(user[1].direct_reports) if hasattr(user[1], "direct_reports") and isinstance(user[1].direct_reports, tuple) else 0
-
-                contacts.append([
-                    display_name, standard_id, email, job_title, department, office_location,
-                    city, country, zip_code, work_phone, mobile, manager_name, manager_standard_id, direct_reports_count
-                ])
+            contacts.append([
+                display_name, standard_id, email, job_title, department,
+                city, country, zip_code, manager_name, manager_standard_id, direct_reports_count
+            ])
 
         print(f"✅ Completed: {query} - {len(contacts)} valid contacts (Job Title Required)")
 
-        # ✅ If exactly 100 results were returned, we need more refined queries
-        if len(resolved_names) == 100 and depth < 3:  # Limit depth to prevent infinite loops
-            for letter in string.ascii_uppercase:  # A-Z
+        if len(resolved_names) == 100 and depth < 3:
+            for letter in string.ascii_uppercase:
                 contacts += fetch_contacts(prefix + letter, depth + 1)
-            for digit in "0123456789":  # 0-9
+            for digit in "0123456789":
                 contacts += fetch_contacts(prefix + digit, depth + 1)
 
         return contacts
 
     except Exception as e:
-        print(f"⚠️ Error fetching GAL for prefix '{prefix}': {e}")
+        log_skipped(f"Unexpected error: {e}", prefix)
         return []
 
 # Multithreading Execution
 contacts = []
 start_time = time.time()
 
-# Use ThreadPoolExecutor to fetch data in multiple threads
 with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
     futures = [executor.submit(fetch_contacts, prefix) for prefix in search_prefixes]
 
-# Collect results
 for future in concurrent.futures.as_completed(futures):
     contacts.extend(future.result())
 
 # Convert to DataFrame
 df = pd.DataFrame(contacts, columns=[
-    "Display Name", "Standard ID", "Email", "Job Title", "Department", "Office Location",
-    "City", "Country", "Zip Code", "Work Phone", "Mobile", "Manager Name", "Manager Standard ID", "Direct Reports Count"
+    "Display Name", "Standard ID", "Email", "Job Title", "Department",
+    "City", "Country", "Zip Code", "Manager Name", "Manager Standard ID", "Direct Reports Count"
 ])
 
 # Save to CSV
@@ -135,4 +134,5 @@ elapsed_time = time.time() - start_time
 print(f"\n✅ Export completed successfully! Data saved to {output_file}")
 print(f"🔹 Total Valid Records Processed: {len(contacts)} (Excluding empty job titles)")
 print(f"⏳ Total Execution Time: {elapsed_time:.2f} seconds")
-zzz
+print(f"⚠️ Skipped entries logged in: {SKIP_LOG_FILE}")
+qqq
