@@ -1,4 +1,4 @@
-Sub ExportOutlookContactsBatchWriteWithCleanup()
+s Sub ExportOutlookContactsBatchWriteWithCleanup()
     Dim OutlookApp As Object
     Dim Namespace As Object
     Dim GAL As Object
@@ -18,7 +18,6 @@ Sub ExportOutlookContactsBatchWriteWithCleanup()
     Dim count As Integer, batchSize As Integer, totalRecords As Integer
     Dim logFilePath As String, outputFilePath As String
     Dim xlApp As Object, xlBook As Object, xlSheet As Object
-    Dim i As Integer
     
     ' Set log and output file paths
     logFilePath = "C:\Users\Public\Outlook_Export_Log.txt"
@@ -93,7 +92,7 @@ Sub ExportOutlookContactsBatchWriteWithCleanup()
                 On Error GoTo 0
                 If JobTitle = "" Or IsNull(JobTitle) Then
                     logFile.WriteLine "SKIPPED: " & FullName & " (No Job Title)"
-                    GoTo NextRecord
+                    GoTo SkipRecord
                 End If
 
                 ' Extract Other Fields
@@ -166,8 +165,9 @@ Sub ExportOutlookContactsBatchWriteWithCleanup()
                     Application.Wait Now + TimeValue("00:00:02") ' 2-second delay
                 End If
             End If
-NextRecord:
-    Next AddressEntry
+        End If
+SkipRecord:
+    Next AddressEntry ' Ensures proper loop structure
 
     ' Write remaining records
     If count > 0 Then xlSheet.Range("A" & rowNum).Resize(count, 18).Value = DataArray
