@@ -1,4 +1,4 @@
-Sub ExportOutlookContactsBatchWriteWithFix()
+now Sub ExportOutlookContactsBatchWriteWithFix()
     Dim OutlookApp As Object
     Dim Namespace As Object
     Dim GAL As Object
