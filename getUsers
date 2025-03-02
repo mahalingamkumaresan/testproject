@@ -18,7 +18,7 @@ except Exception as e:
     print(f"❌ ERROR: Unable to connect to Exchange. {e}")
     exit()
 
-# Function to fetch a batch of GAL contacts
+# Function to fetch GAL contacts
 def fetch_contacts():
     try:
         print("📌 Fetching Global Address List (GAL)...")
@@ -56,11 +56,11 @@ start_time = time.time()
 
 # Use ThreadPoolExecutor to fetch data in multiple threads
 with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-    results = executor.map(fetch_contacts, range(5))  # Run 5 parallel queries
+    futures = [executor.submit(fetch_contacts) for _ in range(5)]  # Run 5 parallel queries
 
-# Flatten the results
-for result in results:
-    contacts.extend(result)
+# Collect results
+for future in concurrent.futures.as_completed(futures):
+    contacts.extend(future.result())
 
 # Convert to DataFrame
 df = pd.DataFrame(contacts, columns=["Full Name", "Email", "Job Title", "Department", "Office Location"])
