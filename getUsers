@@ -54,44 +54,40 @@ def fetch_contacts(prefix, depth=1):
             return []
 
         for user in resolved_names:
-            if not isinstance(user, tuple) or len(user) < 2:
-                log_skipped("Invalid user tuple structure", query, user)
-                continue
+            if isinstance(user, tuple) and len(user) >= 2:  # ✅ Normal Case (Tuple User)
+                job_title = str(user[1].job_title).strip() if hasattr(user[1], "job_title") and user[1].job_title else "N/A"
 
-            if not hasattr(user[0], "name") or not hasattr(user[1], "display_name"):
-                log_skipped("Missing Mailbox or Contact attributes", query, user)
-                continue
+                if job_title == "N/A":
+                    log_skipped("Job Title is empty", query, user[1].display_name)
+                    continue  
 
-            # ✅ Fix: Ensure job_title is always a string before using .strip()
-            job_title = str(user[1].job_title).strip() if hasattr(user[1], "job_title") and user[1].job_title else "N/A"
+                email = user[0].email_address if hasattr(user[0], "email_address") else "N/A"
+                display_name = user[1].display_name if hasattr(user[1], "display_name") else "N/A"
+                standard_id = extract_standard_id(user[0].name) if hasattr(user[0], "name") else "N/A"
 
-            if job_title == "N/A":
-                log_skipped("Job Title is empty", query, user[1].display_name)
-                continue  
+                department = str(user[1].department).strip() if hasattr(user[1], "department") and user[1].department else "N/A"
 
-            email = user[0].email_address if hasattr(user[0], "email_address") else "N/A"
-            display_name = user[1].display_name if hasattr(user[1], "display_name") else "N/A"
-            standard_id = extract_standard_id(user[0].name) if hasattr(user[0], "name") else "N/A"
+                city, country, zip_code = "N/A", "N/A", "N/A"
+                if hasattr(user[1], "physical_addresses") and isinstance(user[1].physical_addresses, tuple) and len(user[1].physical_addresses) > 0:
+                    address = user[1].physical_addresses[0]
+                    city = str(address.city).strip() if hasattr(address, "city") and address.city else "N/A"
+                    country = str(address.country).strip() if hasattr(address, "country") and address.country else "N/A"
+                    zip_code = str(address.zipcode).strip() if hasattr(address, "zipcode") and address.zipcode else "N/A"
 
-            # ✅ Extract Job Title, Department
-            department = str(user[1].department).strip() if hasattr(user[1], "department") and user[1].department else "N/A"
+                manager_name = str(user[1].manager).strip() if hasattr(user[1], "manager") and user[1].manager else "N/A"
+                manager_standard_id = extract_standard_id(manager_name)
 
-            # ✅ Extract Address (City, Country, Zip) from `user[1].physical_addresses[0]`
-            city, country, zip_code = "N/A", "N/A", "N/A"
-            if hasattr(user[1], "physical_addresses") and isinstance(user[1].physical_addresses, tuple) and len(user[1].physical_addresses) > 0:
-                address = user[1].physical_addresses[0]
-                city = str(address.city).strip() if hasattr(address, "city") and address.city else "N/A"
-                country = str(address.country).strip() if hasattr(address, "country") and address.country else "N/A"
-                zip_code = str(address.zipcode).strip() if hasattr(address, "zipcode") and address.zipcode else "N/A"
+                direct_reports_count = len(user[1].direct_reports) if hasattr(user[1], "direct_reports") and isinstance(user[1].direct_reports, tuple) else 0
 
-            # ✅ Extract Manager Name Directly (FIXED)
-            manager_name = str(user[1].manager).strip() if hasattr(user[1], "manager") and user[1].manager else "N/A"
+            else:  # ✅ Handle Non-Tuple Users
+                print(f"⚠️ User is not a tuple. Processing with limited data: {user}")
+                email = user.email_address if hasattr(user, "email_address") else "N/A"
+                display_name = user.name if hasattr(user, "name") else "N/A"
+                standard_id = extract_standard_id(user.name) if hasattr(user, "name") else "N/A"
 
-            # ✅ Extract Manager Standard ID (Extract from name format)
-            manager_standard_id = extract_standard_id(manager_name)
-
-            # ✅ Count Direct Reports
-            direct_reports_count = len(user[1].direct_reports) if hasattr(user[1], "direct_reports") and isinstance(user[1].direct_reports, tuple) else 0
+                # ✅ Set all other fields to "N/A"
+                job_title = department = city = country = zip_code = manager_name = manager_standard_id = "N/A"
+                direct_reports_count = 0
 
             contacts.append([
                 display_name, standard_id, email, job_title, department,
@@ -133,9 +129,3 @@ output_file = "C:\\Users\\Public\\GAL_EWS_Contacts.csv"
 df.to_csv(output_file, index=False, encoding="utf-8")
 
 # Print execution summary
-elapsed_time = time.time() - start_time
-print(f"\n✅ Export completed successfully! Data saved to {output_file}")
-print(f"🔹 Total Valid Records Processed: {len(contacts)} (Excluding empty job titles)")
-print(f"⏳ Total Execution Time: {elapsed_time:.2f} seconds")
-print(f"⚠️ Skipped entries logged in: {SKIP_LOG_FILE}")
-yyy
