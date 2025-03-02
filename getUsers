@@ -1,30 +1,29 @@
-Sub ExportAllOutlookContactsWithLogging()
+Sub ExportOutlookContactsBatchWriteWithCleanup()
     Dim OutlookApp As Object
     Dim Namespace As Object
     Dim GAL As Object
     Dim AddressEntry As Object
     Dim user As Object
-    Dim ExcelApp As Object
-    Dim wb As Object
-    Dim ws As Object
-    Dim logFile As Object
     Dim fso As Object
+    Dim logFile As Object
     Dim rowNum As Long
     Dim NameParts() As String
-    Dim FirstName As String
-    Dim LastName As String
-    Dim FullName As String
-    Dim BusinessAddress As String
+    Dim FirstName As String, LastName As String, FullName As String
+    Dim City As String, State As String, Country As String, ZipCode As String
+    Dim JobTitle As String, Department As String, OfficeLocation As String
+    Dim WorkPhone As String, Mobile As String
+    Dim ManagerName As String, ManagerEmail As String, ManagerPhone As String, ManagerTitle As String
+    Dim DirectReportsCount As Integer
     Dim DataArray() As Variant
-    Dim count As Integer
-    Dim logFilePath As String
-    Dim ManagerName As String
-    Dim ManagerEmail As String
-    Dim startTime As Double
+    Dim count As Integer, batchSize As Integer, totalRecords As Integer
+    Dim logFilePath As String, outputFilePath As String
+    Dim xlApp As Object, xlBook As Object, xlSheet As Object
+    Dim i As Integer
     
-    ' Set log file path
+    ' Set log and output file paths
     logFilePath = "C:\Users\Public\Outlook_Export_Log.txt"
-
+    outputFilePath = "C:\Users\Public\Outlook_GAL_Contacts.xlsx"
+    
     ' Initialize File System Object for logging
     Set fso = CreateObject("Scripting.FileSystemObject")
     Set logFile = fso.OpenTextFile(logFilePath, 8, True) ' Open in append mode
@@ -40,39 +39,32 @@ Sub ExportAllOutlookContactsWithLogging()
     On Error GoTo 0
 
     If OutlookApp Is Nothing Or GAL Is Nothing Then
-        logFile.WriteLine "ERROR: Unable to access Outlook GAL. Check Outlook settings."
+        logFile.WriteLine "ERROR: Unable to access Outlook GAL."
         logFile.Close
         MsgBox "Error: Unable to access Outlook GAL. Check your Outlook settings.", vbCritical, "Outlook Error"
         Exit Sub
     End If
 
-    ' Create a new instance of Excel if not already open
-    On Error Resume Next
-    Set ExcelApp = GetObject(, "Excel.Application")
-    If ExcelApp Is Nothing Then
-        Set ExcelApp = CreateObject("Excel.Application")
-        ExcelApp.Visible = False ' Keep Excel hidden while processing
-    End If
-    On Error GoTo 0
+    ' Define batch size (write in chunks of 500 records)
+    batchSize = 500
+    totalRecords = GAL.AddressEntries.Count
+    ReDim DataArray(1 To batchSize, 1 To 18) ' Allocate memory for batch processing
 
-    ' Create a new workbook
-    Set wb = ExcelApp.Workbooks.Add
-    Set ws = wb.Sheets(1)
-
-    ' Turn off screen updating and calculation for speed
-    wb.Application.ScreenUpdating = False
-    wb.Application.Calculation = -4135 ' xlCalculationManual
+    ' Create a new Excel file
+    Set xlApp = CreateObject("Excel.Application")
+    Set xlBook = xlApp.Workbooks.Add
+    Set xlSheet = xlBook.Sheets(1)
 
     ' Write header row
     Dim Headers As Variant
     Headers = Array("Full Name", "First Name", "Last Name", "Email", "Job Title", "Department", "Office Location", _
-                    "Business Address", "Work Phone", "Mobile Number", "Manager Name", "Manager Email", "Notes")
-    ws.Range("A1:M1").Value = Headers
+                    "City", "State", "Country", "Zip Code", "Work Phone", "Mobile", _
+                    "Manager Name", "Manager Email", "Manager Phone", "Manager Title", "Direct Reports Count")
+    xlSheet.Range("A1:R1").Value = Headers
 
-    ' Prepare data storage array
+    ' Start processing contacts
     count = 0
-    rowNum = 2 ' Start from row 2
-    ReDim DataArray(1 To GAL.AddressEntries.Count, 1 To 13) ' Define array size based on entry count
+    rowNum = 2 ' Start from row 2 in Excel
 
     ' Loop through all Address Entries
     For Each AddressEntry In GAL.AddressEntries
@@ -80,91 +72,111 @@ Sub ExportAllOutlookContactsWithLogging()
             Set user = AddressEntry.GetExchangeUser()
             
             If Not user Is Nothing Then
-                ' Fix for Last Name appearing as "." and First Name empty
+                ' Extract Full Name and Handle Missing Last Name Cases
                 FullName = Trim(user.Name)
-                If FullName = "." Or FullName = "" Then
-                    FullName = "Unknown"
-                End If
+                If FullName = "." Or FullName = "" Then FullName = "Unknown"
 
-                ' Split into First Name & Last Name
+                ' Extract First Name & Last Name Properly
                 NameParts = Split(FullName, " ")
                 If UBound(NameParts) >= 1 Then
-                    LastName = NameParts(UBound(NameParts)) ' Last word as Last Name
+                    LastName = NameParts(UBound(NameParts))
+                    If LastName = "." Then LastName = "Unknown"
                     FirstName = Trim(Left(FullName, Len(FullName) - Len(LastName)))
                 Else
                     FirstName = FullName
                     LastName = "Unknown"
                 End If
 
-                ' Fix for missing Business Address
+                ' Extract Job Title (Skip Record if Empty)
                 On Error Resume Next
-                BusinessAddress = user.OfficeAddress
-                If BusinessAddress = "" Or IsNull(BusinessAddress) Then BusinessAddress = user.BusinessAddress
-                If BusinessAddress = "" Or IsNull(BusinessAddress) Then BusinessAddress = user.StreetAddress
-                If BusinessAddress = "" Or IsNull(BusinessAddress) Then BusinessAddress = "Not Available"
+                JobTitle = user.JobTitle
+                On Error GoTo 0
+                If JobTitle = "" Or IsNull(JobTitle) Then
+                    logFile.WriteLine "SKIPPED: " & FullName & " (No Job Title)"
+                    GoTo NextRecord
+                End If
+
+                ' Extract Other Fields
+                On Error Resume Next
+                Department = user.Department
+                OfficeLocation = user.OfficeLocation
+                WorkPhone = user.BusinessTelephoneNumber
+                Mobile = user.MobileTelephoneNumber
+                City = user.City
+                State = user.State
+                Country = user.Country
+                ZipCode = user.ZipCode
                 On Error GoTo 0
 
-                ' Handle Manager Permission Errors
+                ' Extract Manager Details
                 On Error Resume Next
                 ManagerName = user.Manager.Name
                 ManagerEmail = user.Manager.PrimarySmtpAddress
+                ManagerPhone = user.Manager.BusinessTelephoneNumber
+                ManagerTitle = user.Manager.JobTitle
                 If Err.Number <> 0 Then
                     ManagerName = "Permission Denied"
                     ManagerEmail = "Permission Denied"
+                    ManagerPhone = "Permission Denied"
+                    ManagerTitle = "Permission Denied"
                     logFile.WriteLine "WARNING: Manager details not accessible for " & FullName
                 End If
                 Err.Clear
                 On Error GoTo 0
 
-                ' Store data in array instead of writing cell by cell
+                ' Extract Direct Reports Count
+                On Error Resume Next
+                DirectReportsCount = 0
+                For Each report In user.DirectReports
+                    DirectReportsCount = DirectReportsCount + 1
+                Next report
+                On Error GoTo 0
+
+                ' Store in Batch Array
                 DataArray(count + 1, 1) = FullName
                 DataArray(count + 1, 2) = FirstName
                 DataArray(count + 1, 3) = LastName
                 DataArray(count + 1, 4) = user.PrimarySmtpAddress
-                DataArray(count + 1, 5) = IIf(user.JobTitle <> "", user.JobTitle, "N/A")
-                DataArray(count + 1, 6) = IIf(user.Department <> "", user.Department, "N/A")
-                DataArray(count + 1, 7) = IIf(user.OfficeLocation <> "", user.OfficeLocation, "N/A")
-                DataArray(count + 1, 8) = BusinessAddress
-                DataArray(count + 1, 9) = IIf(user.BusinessTelephoneNumber <> "", user.BusinessTelephoneNumber, "N/A")
-                DataArray(count + 1, 10) = IIf(user.MobileTelephoneNumber <> "", user.MobileTelephoneNumber, "N/A")
-                DataArray(count + 1, 11) = ManagerName
-                DataArray(count + 1, 12) = ManagerEmail
-                DataArray(count + 1, 13) = IIf(user.Notes <> "", user.Notes, "N/A")
+                DataArray(count + 1, 5) = JobTitle
+                DataArray(count + 1, 6) = Department
+                DataArray(count + 1, 7) = OfficeLocation
+                DataArray(count + 1, 8) = City
+                DataArray(count + 1, 9) = State
+                DataArray(count + 1, 10) = Country
+                DataArray(count + 1, 11) = ZipCode
+                DataArray(count + 1, 12) = WorkPhone
+                DataArray(count + 1, 13) = Mobile
+                DataArray(count + 1, 14) = ManagerName
+                DataArray(count + 1, 15) = ManagerEmail
+                DataArray(count + 1, 16) = ManagerPhone
+                DataArray(count + 1, 17) = ManagerTitle
+                DataArray(count + 1, 18) = DirectReportsCount
 
                 count = count + 1
+
+                ' Write batch to Excel when batch size is reached
+                If count = batchSize Then
+                    xlSheet.Range("A" & rowNum).Resize(count, 18).Value = DataArray
+                    rowNum = rowNum + count
+                    count = 0
+                    
+                    ' Clear memory for the next batch
+                    ReDim DataArray(1 To batchSize, 1 To 18)
+                    logFile.WriteLine "Batch written. Taking a short delay..."
+                    Application.Wait Now + TimeValue("00:00:02") ' 2-second delay
+                End If
             End If
-        End If
+NextRecord:
     Next AddressEntry
 
-    ' Write all data at once to Excel
-    ws.Range("A2").Resize(count, 13).Value = DataArray
+    ' Write remaining records
+    If count > 0 Then xlSheet.Range("A" & rowNum).Resize(count, 18).Value = DataArray
 
-    ' Turn screen updating and calculations back on
-    wb.Application.ScreenUpdating = True
-    wb.Application.Calculation = -4105 ' xlCalculationAutomatic
+    ' Save & Close Excel
+    xlBook.SaveAs outputFilePath
+    xlBook.Close False
+    xlApp.Quit
 
-    ' Autofit columns for better readability
-    ws.Columns("A:M").AutoFit
-
-    ' Save the workbook
-    Dim filePath As String
-    filePath = "C:\Users\Public\Outlook_GAL_Contacts.xlsx"
-    wb.SaveAs filePath
-    logFile.WriteLine "Export completed successfully! " & count & " Outlook contacts saved."
-    logFile.WriteLine "File saved at: " & filePath
-    logFile.WriteLine "Export ended at: " & Now
+    logFile.WriteLine "Export completed successfully!"
     logFile.Close
-
-    ' Cleanup
-    wb.Close True ' Close Excel file and save changes
-    ExcelApp.Quit ' Close Excel application
-
-    ' Release memory
-    Set ws = Nothing
-    Set wb = Nothing
-    Set ExcelApp = Nothing
-    Set OutlookApp = Nothing
-    Set Namespace = Nothing
-    Set GAL = Nothing
-    Set fso = Nothing
 End Sub
