@@ -3,6 +3,7 @@ from exchangelib import Credentials, Account
 import pandas as pd
 import time
 import string
+import re  # Used to extract Standard ID
 
 # Set your Exchange credentials
 EMAIL = "your.email@company.com"
@@ -22,7 +23,14 @@ except Exception as e:
 # Character set to iterate over GAL efficiently
 search_prefixes = list(string.ascii_uppercase + "0123456789@._")
 
-# ✅ Function to recursively fetch contacts if more than 100 exist per query
+# Function to extract Standard ID from name format "LastName, FirstName STANDARDID"
+def extract_standard_id(name):
+    if name:
+        match = re.search(r'\b(\w+)$', name)  # Extracts last word (Standard ID)
+        return match.group(1) if match else "N/A"
+    return "N/A"
+
+# Function to fetch contacts in batches (handles pagination)
 def fetch_contacts(prefix, depth=1):
     """Recursively fetch contacts by refining the search query if needed."""
     try:
@@ -46,21 +54,23 @@ def fetch_contacts(prefix, depth=1):
                 # ✅ Extract Email from `user[0].email_address` (inside Mailbox)
                 email = user[0].email_address if hasattr(user[0], "email_address") else "N/A"
 
-                # ✅ Extract Other Fields from `user[1]`
-                full_name = user[1].display_name if hasattr(user[1], "display_name") else "N/A"
-                first_name = user[1].given_name if hasattr(user[1], "given_name") else "N/A"
-                last_name = user[1].surname if hasattr(user[1], "surname") else "N/A"
+                # ✅ Extract Display Name (Removing First/Last Name from Output)
+                display_name = user[1].display_name if hasattr(user[1], "display_name") else "N/A"
+
+                # ✅ Extract Standard ID from `user[0].name`
+                standard_id = extract_standard_id(user[0].name) if hasattr(user[0], "name") else "N/A"
+
+                # ✅ Extract Job Title, Department, Office Location
                 department = user[1].department if hasattr(user[1], "department") else "N/A"
                 office_location = user[1].office_location if hasattr(user[1], "office_location") else "N/A"
 
-                # ✅ Extract Address (City, State, Country) from `user[1].physical_addresses`
-                city, state, country = "N/A", "N/A", "N/A"
-                if hasattr(user[1], "physical_addresses") and isinstance(user[1].physical_addresses, tuple):
-                    for address in user[1].physical_addresses:
-                        if hasattr(address, "label") and address.label == "Business":
-                            city = address.city if hasattr(address, "city") else "N/A"
-                            state = address.state if hasattr(address, "state") else "N/A"
-                            country = address.country if hasattr(address, "country") else "N/A"
+                # ✅ Extract Address (City, Country, Zip) from `user[1].physical_addresses[0]`
+                city, country, zip_code = "N/A", "N/A", "N/A"
+                if hasattr(user[1], "physical_addresses") and isinstance(user[1].physical_addresses, tuple) and len(user[1].physical_addresses) > 0:
+                    address = user[1].physical_addresses[0]  # Use first address
+                    city = address.city if hasattr(address, "city") else "N/A"
+                    country = address.country if hasattr(address, "country") else "N/A"
+                    zip_code = address.zipcode if hasattr(address, "zipcode") else "N/A"
 
                 # ✅ Extract Phone Numbers (Work & Mobile) from `user[1].phone_numbers`
                 work_phone, mobile = "N/A", "N/A"
@@ -71,15 +81,16 @@ def fetch_contacts(prefix, depth=1):
                         elif hasattr(phone, "label") and phone.label == "MobilePhone":
                             mobile = phone.phone_number if hasattr(phone, "phone_number") else "N/A"
 
-                # ✅ Extract Manager Name from `user[1].manager`
-                manager = user[1].manager.name if hasattr(user[1], "manager") and user[1].manager else "N/A"
+                # ✅ Extract Manager Name and Manager Standard ID
+                manager_name = user[1].manager.name if hasattr(user[1], "manager") and user[1].manager else "N/A"
+                manager_standard_id = extract_standard_id(manager_name)
 
                 # ✅ Count Direct Reports from `user[1].direct_reports`
                 direct_reports_count = len(user[1].direct_reports) if hasattr(user[1], "direct_reports") and isinstance(user[1].direct_reports, tuple) else 0
 
                 contacts.append([
-                    full_name, first_name, last_name, email, job_title, department, office_location,
-                    city, state, country, work_phone, mobile, manager, direct_reports_count
+                    display_name, standard_id, email, job_title, department, office_location,
+                    city, country, zip_code, work_phone, mobile, manager_name, manager_standard_id, direct_reports_count
                 ])
 
         print(f"✅ Completed: {query} - {len(contacts)} valid contacts (Job Title Required)")
@@ -111,8 +122,8 @@ for future in concurrent.futures.as_completed(futures):
 
 # Convert to DataFrame
 df = pd.DataFrame(contacts, columns=[
-    "Full Name", "First Name", "Last Name", "Email", "Job Title", "Department", "Office Location",
-    "City", "State", "Country", "Work Phone", "Mobile", "Manager Name", "Direct Reports Count"
+    "Display Name", "Standard ID", "Email", "Job Title", "Department", "Office Location",
+    "City", "Country", "Zip Code", "Work Phone", "Mobile", "Manager Name", "Manager Standard ID", "Direct Reports Count"
 ])
 
 # Save to CSV
@@ -124,3 +135,4 @@ elapsed_time = time.time() - start_time
 print(f"\n✅ Export completed successfully! Data saved to {output_file}")
 print(f"🔹 Total Valid Records Processed: {len(contacts)} (Excluding empty job titles)")
 print(f"⏳ Total Execution Time: {elapsed_time:.2f} seconds")
+zzz
