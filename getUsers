@@ -62,9 +62,10 @@ def fetch_contacts(prefix, depth=1):
                 log_skipped("Missing Mailbox or Contact attributes", query, user)
                 continue
 
-            job_title = user[1].job_title if hasattr(user[1], "job_title") else ""
+            # ✅ Fix: Ensure job_title is always a string before using .strip()
+            job_title = str(user[1].job_title).strip() if hasattr(user[1], "job_title") and user[1].job_title else "N/A"
 
-            if not job_title.strip():
+            if job_title == "N/A":
                 log_skipped("Job Title is empty", query, user[1].display_name)
                 continue  
 
@@ -72,19 +73,21 @@ def fetch_contacts(prefix, depth=1):
             display_name = user[1].display_name if hasattr(user[1], "display_name") else "N/A"
             standard_id = extract_standard_id(user[0].name) if hasattr(user[0], "name") else "N/A"
 
-            # ✅ Extract Job Title, Department (Office Location & Phone Numbers Removed)
-            department = user[1].department if hasattr(user[1], "department") else "N/A"
+            # ✅ Extract Job Title, Department
+            department = str(user[1].department).strip() if hasattr(user[1], "department") and user[1].department else "N/A"
 
             # ✅ Extract Address (City, Country, Zip) from `user[1].physical_addresses[0]`
             city, country, zip_code = "N/A", "N/A", "N/A"
             if hasattr(user[1], "physical_addresses") and isinstance(user[1].physical_addresses, tuple) and len(user[1].physical_addresses) > 0:
                 address = user[1].physical_addresses[0]
-                city = address.city if hasattr(address, "city") else "N/A"
-                country = address.country if hasattr(address, "country") else "N/A"
-                zip_code = address.zipcode if hasattr(address, "zipcode") else "N/A"
+                city = str(address.city).strip() if hasattr(address, "city") and address.city else "N/A"
+                country = str(address.country).strip() if hasattr(address, "country") and address.country else "N/A"
+                zip_code = str(address.zipcode).strip() if hasattr(address, "zipcode") and address.zipcode else "N/A"
 
-            # ✅ Extract Manager Name and Manager Standard ID
-            manager_name = user[1].manager.name if hasattr(user[1], "manager") and user[1].manager else "N/A"
+            # ✅ Extract Manager Name Directly (FIXED)
+            manager_name = str(user[1].manager).strip() if hasattr(user[1], "manager") and user[1].manager else "N/A"
+
+            # ✅ Extract Manager Standard ID (Extract from name format)
             manager_standard_id = extract_standard_id(manager_name)
 
             # ✅ Count Direct Reports
@@ -135,4 +138,4 @@ print(f"\n✅ Export completed successfully! Data saved to {output_file}")
 print(f"🔹 Total Valid Records Processed: {len(contacts)} (Excluding empty job titles)")
 print(f"⏳ Total Execution Time: {elapsed_time:.2f} seconds")
 print(f"⚠️ Skipped entries logged in: {SKIP_LOG_FILE}")
-qqq
+yyy
