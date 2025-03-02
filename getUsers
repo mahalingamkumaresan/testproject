@@ -1,4 +1,4 @@
-s Sub ExportOutlookContactsBatchWriteWithCleanup()
+Sub ExportOutlookContactsBatchWriteWithFix()
     Dim OutlookApp As Object
     Dim Namespace As Object
     Dim GAL As Object
@@ -15,7 +15,7 @@ s Sub ExportOutlookContactsBatchWriteWithCleanup()
     Dim ManagerName As String, ManagerEmail As String, ManagerPhone As String, ManagerTitle As String
     Dim DirectReportsCount As Integer
     Dim DataArray() As Variant
-    Dim count As Integer, batchSize As Integer, totalRecords As Integer
+    Dim count As Long, batchSize As Integer, totalRecords As Long
     Dim logFilePath As String, outputFilePath As String
     Dim xlApp As Object, xlBook As Object, xlSheet As Object
     
@@ -44,9 +44,14 @@ s Sub ExportOutlookContactsBatchWriteWithCleanup()
         Exit Sub
     End If
 
+    ' Fix Overflow: Use Long instead of Integer
+    totalRecords = CLng(GAL.AddressEntries.Count)
+    
+    ' Display Count in MsgBox
+    MsgBox "Total records found in Global Address List: " & totalRecords, vbInformation, "GAL Record Count"
+
     ' Define batch size (write in chunks of 500 records)
     batchSize = 500
-    totalRecords = GAL.AddressEntries.Count
     ReDim DataArray(1 To batchSize, 1 To 18) ' Allocate memory for batch processing
 
     ' Create a new Excel file
@@ -167,7 +172,7 @@ s Sub ExportOutlookContactsBatchWriteWithCleanup()
             End If
         End If
 SkipRecord:
-    Next AddressEntry ' Ensures proper loop structure
+    Next AddressEntry
 
     ' Write remaining records
     If count > 0 Then xlSheet.Range("A" & rowNum).Resize(count, 18).Value = DataArray
