@@ -1,134 +1,130 @@
-import pandas as pd
 import requests
-import time
+import pandas as pd
+import os
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 
-# Configure logging
-logging.basicConfig(filename='processCommitIDs/bitbucket_audit.log', level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+# --- CONFIGURATION ---
+BASE_DIR = r"C:\RiskPortal\GetRepos"  # Input & Output Directory
+INPUT_FILE = os.path.join(BASE_DIR, "CI.xlsx")  # Excel file containing SPK column
+OUTPUT_FILE = os.path.join(BASE_DIR, "Bitbucket_Repositories.xlsx")  # Output file
+LOG_FILE = os.path.join(BASE_DIR, "bitbucket_fetch.log")  # Log file
 
 # Bitbucket API Credentials
-BITBUCKET_USERNAME = "nbkpjqb"
-BITBUCKET_PASSWORD = "your_password"
-BITBUCKET_BASE_URL = "https://scm.horizon.bankofamerica.com/rest/api/latest"
+BITBUCKET_URL = "https://api.bitbucket.org/2.0/repositories"
+USERNAME = "your_username"  # Replace with your Bitbucket username
+APP_PASSWORD = "your_app_password"  # Replace with your Bitbucket app password
 
-# Rate Limit Settings
-MAX_THREADS = 3  # Limit concurrency
-RETRY_LIMIT = 3  # Retry up to 3 times
-INITIAL_BACKOFF = 10  # Initial wait time in seconds
+# --- SETUP LOGGING ---
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO, 
+                    format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Date Range for Commits
-START_DATE = "2024-01-01T00:00:00Z"
-END_DATE = datetime.utcnow().isoformat() + "Z"
-
-# Read SPK.xlsx (project keys)
-def get_project_keys(spk_file):
-    df = pd.read_excel(spk_file)
-    df.columns = df.columns.str.lower()  # Handle case insensitivity
-    if 'spk' not in df.columns:
-        raise ValueError("SPK.xlsx must contain a 'SPK' column.")
-    return df['spk'].dropna().unique().tolist()
-
-# Read commit.xlsx
-def get_commit_data(commit_file):
-    df = pd.read_excel(commit_file)
-    df.columns = df.columns.str.lower()  # Handle case insensitivity
-    required_columns = {'repository_name', 'branch_name', 'commit_id', 'spk'}
-    if not required_columns.issubset(df.columns):
-        raise ValueError(f"Missing required columns: {required_columns - set(df.columns)}")
-    df['updated_spk'] = ''
-    return df
-
-# Bitbucket API Request with retries
-def bitbucket_api_request(url):
-    headers = {"Accept": "application/json"}
-    retries = 0
-    backoff = INITIAL_BACKOFF
-    while retries < RETRY_LIMIT:
-        response = requests.get(url, auth=(BITBUCKET_USERNAME, BITBUCKET_PASSWORD), headers=headers, verify=False)
-        
+# --- FUNCTION TO VALIDATE API ACCESS ---
+def validate_api_access():
+    """Validates user access to the Bitbucket API before making bulk requests."""
+    test_url = f"{BITBUCKET_URL}?pagelen=1"
+    try:
+        response = requests.get(test_url, auth=(USERNAME, APP_PASSWORD))
         if response.status_code == 200:
-            return response.json()
-        elif response.status_code == 429:  # Rate Limit Hit
-            retry_after = int(response.headers.get("Retry-After", backoff))
-            logging.warning(f"Rate limit hit. Retrying after {retry_after} seconds.")
-            time.sleep(retry_after)
-        elif response.status_code >= 500:
-            logging.warning(f"Server error {response.status_code}. Retrying {retries + 1}/{RETRY_LIMIT}...")
-            time.sleep(backoff)
+            logging.info("API validation successful.")
+            print("✅ API access validated successfully.")
+            return True
         else:
-            logging.error(f"Failed API call to {url}: {response.status_code} - {response.text}")
-            return None
-        
-        retries += 1
-        backoff *= 2  # Exponential backoff
-    return None
+            logging.error(f"API validation failed: {response.status_code} - {response.text}")
+            print(f"❌ API validation failed. Check {LOG_FILE} for details.")
+            return False
+    except requests.exceptions.RequestException as e:
+        logging.error(f"API validation error: {e}")
+        print(f"❌ API validation error. Check {LOG_FILE} for details.")
+        return False
 
-# Get all repositories in a project (SPK)
-def get_repositories(project_key):
-    url = f"{BITBUCKET_BASE_URL}/projects/{project_key}/repos?limit=100"
-    repos = []
+# --- FUNCTION TO FETCH REPOSITORIES ---
+def fetch_repositories(spk):
+    """
+    Fetches all repositories for a given SPK (project key) from Bitbucket API.
+    Handles pagination to get all results.
+    """
+    url = f"{BITBUCKET_URL}?q=project.key=\"{spk}\"&pagelen=100"
+    repositories = []
+    failure_count = 0
+
     while url:
-        data = bitbucket_api_request(url)
-        if data:
-            repos.extend([repo['slug'] for repo in data.get('values', [])])
-            url = data.get('next')  # Handle pagination
-        else:
-            break
-    return repos
+        try:
+            response = requests.get(url, auth=(USERNAME, APP_PASSWORD))
+            response.raise_for_status()  # Raise an error for bad responses
+            data = response.json()
 
-# Get all commits in a repository within the date range
-def get_all_commits(project_key, repo):
-    url = f"{BITBUCKET_BASE_URL}/projects/{project_key}/repos/{repo}/commits?limit=100&since={START_DATE}&until={END_DATE}"
-    commits = set()
-    while url:
-        data = bitbucket_api_request(url)
-        if data:
-            commits.update(commit['id'] for commit in data.get('values', []))
-            url = data.get('next')
-        else:
-            break
-    return commits
+            # Extract repository information
+            for repo in data.get('values', []):
+                repositories.append({
+                    "Project Key": spk,
+                    "Repo Name": repo.get("name"),
+                    "Repo Slug": repo.get("slug"),
+                    "Repo ID": repo.get("uuid"),
+                    "SCM Type": repo.get("scm"),
+                    "State": repo.get("state"),
+                    "Default Branch": repo.get("mainbranch", {}).get("name", "N/A"),
+                    "Last Updated": repo.get("updated_on"),
+                    "Size (Bytes)": repo.get("size"),
+                    "Language": repo.get("language", "N/A"),
+                    "Forks": repo.get("forks_count", "N/A"),
+                    "Watchers": repo.get("watchers_count", "N/A"),
+                    "Clone URL (HTTPS)": next((link['href'] for link in repo.get('links', {}).get('clone', []) if link['name'] == 'https'), "N/A"),
+                    "Repo URL": repo.get("links", {}).get("html", {}).get("href", "N/A"),
+                })
 
-# Process each project
-def process_project(project_key, commit_df):
-    logging.info(f"Processing project: {project_key}")
-    updated_rows = 0
-    
-    repos = get_repositories(project_key)
-    for repo in repos:
-        commits = get_all_commits(project_key, repo)
-        
-        for index, row in commit_df.iterrows():
-            if row['commit_id'] in commits:
-                commit_df.at[index, 'updated_spk'] = project_key
-                updated_rows += 1
-    
-    logging.info(f"Updated {updated_rows} rows for project: {project_key}")
-    return commit_df
+            # Check for pagination
+            url = data.get("next", None)
+            time.sleep(1)  # Respect API rate limits
 
-# Main execution
-def update_commit_file(commit_file, spk_file):
-    commit_df = get_commit_data(commit_file)
-    project_keys = get_project_keys(spk_file)
-    
-    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        futures = {executor.submit(process_project, pk, commit_df.copy()): pk for pk in project_keys}
-        for future in as_completed(futures):
-            pk = futures[future]
-            try:
-                result_df = future.result()
-                commit_df.update(result_df)
-            except Exception as e:
-                logging.error(f"Error processing project {pk}: {e}")
-    
-    # Save updated file
-    output_file = "processCommitIDs/updated_commit.xlsx"
-    commit_df.to_excel(output_file, index=False)
-    logging.info(f"Updated file saved as {output_file}")
-    return output_file
+        except requests.exceptions.RequestException as e:
+            failure_count += 1
+            logging.error(f"Failed to fetch repositories for SPK: {spk} - {e}")
 
-# Example usage
-# update_commit_file('processCommitIDs/commit.xlsx', 'processCommitIDs/SPK.xlsx')
+    return repositories, failure_count
+
+# --- MAIN SCRIPT ---
+def main():
+    if not validate_api_access():
+        return  # Stop execution if API validation fails
+
+    try:
+        # Load SPK column from Excel
+        df = pd.read_excel(INPUT_FILE, usecols=["SPK"])
+        spk_list = df["SPK"].dropna().unique()  # Remove duplicates & NaN
+
+        all_repos = []
+        total_failures = 0
+
+        # Use ThreadPoolExecutor for parallel execution
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_spk = {executor.submit(fetch_repositories, spk): spk for spk in spk_list}
+
+            for future in as_completed(future_to_spk):
+                spk = future_to_spk[future]
+                try:
+                    repos, failures = future.result()
+                    all_repos.extend(repos)
+                    total_failures += failures
+                    print(f"✅ Completed SPK: {spk} | Repos: {len(repos)} | Failures: {failures}")
+                except Exception as e:
+                    logging.error(f"Unexpected error for SPK {spk}: {e}")
+                    total_failures += 1
+
+        # Save results to Excel
+        if all_repos:
+            output_df = pd.DataFrame(all_repos)
+            output_df.to_excel(OUTPUT_FILE, index=False)
+            print(f"✅ Repository data saved to {OUTPUT_FILE}")
+
+        # Log total failures
+        logging.info(f"Total failures: {total_failures}")
+        print(f"⚠️ Total failures logged: {total_failures}")
+
+    except Exception as e:
+        logging.error(f"Unexpected error in main: {e}")
+        print("❌ An error occurred. Check the log file for details.")
+
+if __name__ == "__main__":
+    main()
