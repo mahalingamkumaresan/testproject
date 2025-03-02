@@ -3,7 +3,8 @@ from exchangelib import Credentials, Account
 import pandas as pd
 import time
 import string
-import re  # Used to extract Standard ID
+import re
+import random  # ✅ For introducing delays
 
 # Set your Exchange credentials
 EMAIL = "your.email@company.com"
@@ -11,6 +12,9 @@ PASSWORD = "your_password"
 
 # Log file for skipped entries
 SKIP_LOG_FILE = "C:\\Users\\Public\\GAL_Skipped_Entries.log"
+
+# ✅ Set to track processed emails (Avoids duplicates)
+processed_emails = set()
 
 # Connect to Exchange
 try:
@@ -47,6 +51,9 @@ def fetch_contacts(prefix, depth=1):
         contacts = []
         query = prefix + "*"
 
+        # ✅ Add a random delay before making the request to prevent server overload
+        time.sleep(random.uniform(0.5, 2))
+
         print(f"📌 Fetching contacts starting with: {query} ...")
         resolved_names = account.protocol.resolve_names(query, return_full_contact_data=True)
 
@@ -54,20 +61,30 @@ def fetch_contacts(prefix, depth=1):
             return []
 
         for user in resolved_names:
-            if isinstance(user, tuple) and len(user) >= 2:  # ✅ Normal Case (Tuple User)
-                job_title = str(user[1].job_title).strip() if hasattr(user[1], "job_title") and user[1].job_title else "N/A"
+            email = "N/A"
+            display_name = "N/A"
+            standard_id = "N/A"
+            job_title = department = city = country = zip_code = manager_name = manager_standard_id = "N/A"
+            direct_reports_count = 0
 
+            if isinstance(user, tuple) and len(user) >= 2:  # ✅ Normal Case (Tuple User)
+                email = user[0].email_address if hasattr(user[0], "email_address") else "N/A"
+                
+                # ✅ Skip duplicate records (Avoids ABA, ABB duplicates)
+                if email in processed_emails:
+                    continue
+                processed_emails.add(email)
+
+                display_name = user[1].display_name if hasattr(user[1], "display_name") else "N/A"
+                standard_id = extract_standard_id(user[0].name) if hasattr(user[0], "name") else "N/A"
+
+                job_title = str(user[1].job_title).strip() if hasattr(user[1], "job_title") and user[1].job_title else "N/A"
                 if job_title == "N/A":
                     log_skipped("Job Title is empty", query, user[1].display_name)
                     continue  
 
-                email = user[0].email_address if hasattr(user[0], "email_address") else "N/A"
-                display_name = user[1].display_name if hasattr(user[1], "display_name") else "N/A"
-                standard_id = extract_standard_id(user[0].name) if hasattr(user[0], "name") else "N/A"
-
                 department = str(user[1].department).strip() if hasattr(user[1], "department") and user[1].department else "N/A"
 
-                city, country, zip_code = "N/A", "N/A", "N/A"
                 if hasattr(user[1], "physical_addresses") and isinstance(user[1].physical_addresses, tuple) and len(user[1].physical_addresses) > 0:
                     address = user[1].physical_addresses[0]
                     city = str(address.city).strip() if hasattr(address, "city") and address.city else "N/A"
@@ -82,12 +99,14 @@ def fetch_contacts(prefix, depth=1):
             else:  # ✅ Handle Non-Tuple Users
                 print(f"⚠️ User is not a tuple. Processing with limited data: {user}")
                 email = user.email_address if hasattr(user, "email_address") else "N/A"
+
+                # ✅ Skip duplicate records
+                if email in processed_emails:
+                    continue
+                processed_emails.add(email)
+
                 display_name = user.name if hasattr(user, "name") else "N/A"
                 standard_id = extract_standard_id(user.name) if hasattr(user, "name") else "N/A"
-
-                # ✅ Set all other fields to "N/A"
-                job_title = department = city = country = zip_code = manager_name = manager_standard_id = "N/A"
-                direct_reports_count = 0
 
             contacts.append([
                 display_name, standard_id, email, job_title, department,
@@ -129,3 +148,9 @@ output_file = "C:\\Users\\Public\\GAL_EWS_Contacts.csv"
 df.to_csv(output_file, index=False, encoding="utf-8")
 
 # Print execution summary
+elapsed_time = time.time() - start_time
+print(f"\n✅ Export completed successfully! Data saved to {output_file}")
+print(f"🔹 Total Valid Records Processed: {len(contacts)} (Excluding empty job titles)")
+print(f"⏳ Total Execution Time: {elapsed_time:.2f} seconds")
+print(f"⚠️ Skipped entries logged in: {SKIP_LOG_FILE}")
+sss
