@@ -1,21 +1,76 @@
-pip install exchangelib pandas
-
+import concurrent.futures
 from exchangelib import Credentials, Account
 import pandas as pd
+import time
 
-# Set credentials
-credentials = Credentials("your.email@company.com", "your_password")
+# Set your Exchange credentials
+EMAIL = "your.email@company.com"
+PASSWORD = "your_password"
 
 # Connect to Exchange
-account = Account("your.email@company.com", credentials=credentials, autodiscover=True)
+try:
+    print("Connecting to Exchange...")
+    credentials = Credentials(EMAIL, PASSWORD)
+    account = Account(EMAIL, credentials=credentials, autodiscover=True)
+    print("✅ Connected to Exchange successfully!")
 
-# Fetch GAL
+except Exception as e:
+    print(f"❌ ERROR: Unable to connect to Exchange. {e}")
+    exit()
+
+# Function to fetch a batch of GAL contacts
+def fetch_contacts():
+    try:
+        print("📌 Fetching Global Address List (GAL)...")
+
+        # Query all contacts with a wildcard (*)
+        resolved_names = account.protocol.resolve_names("*", return_full_contact_data=True)
+        contacts = []
+
+        for user in resolved_names:
+            if user and user.email_addresses:
+                job_title = user.job_title if user.job_title else ""
+                
+                # ✅ Skip contacts where jobTitle is empty
+                if not job_title.strip():
+                    continue  
+
+                contacts.append([
+                    user.display_name,
+                    user.email_addresses[0] if user.email_addresses else "N/A",
+                    job_title,
+                    user.department if user.department else "N/A",
+                    user.office_location if user.office_location else "N/A"
+                ])
+        
+        print(f"✅ Completed: Fetched {len(contacts)} valid contacts (Job Title Required)")
+        return contacts
+
+    except Exception as e:
+        print(f"⚠️ Error fetching GAL: {e}")
+        return []
+
+# Multithreading Execution
 contacts = []
-for contact in account.contacts.all():
-    contacts.append([contact.display_name, contact.email_addresses, contact.job_title])
+start_time = time.time()
+
+# Use ThreadPoolExecutor to fetch data in multiple threads
+with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    results = executor.map(fetch_contacts, range(5))  # Run 5 parallel queries
+
+# Flatten the results
+for result in results:
+    contacts.extend(result)
 
 # Convert to DataFrame
-df = pd.DataFrame(contacts, columns=["Full Name", "Email", "Job Title"])
-df.to_csv("C:\\Users\\Public\\GAL_EWS.csv", index=False)
+df = pd.DataFrame(contacts, columns=["Full Name", "Email", "Job Title", "Department", "Office Location"])
 
-print("Export Completed!")
+# Save to CSV
+output_file = "C:\\Users\\Public\\GAL_EWS_Contacts.csv"
+df.to_csv(output_file, index=False, encoding="utf-8")
+
+# Print execution summary
+elapsed_time = time.time() - start_time
+print(f"\n✅ Export completed successfully! Data saved to {output_file}")
+print(f"🔹 Total Valid Records Processed: {len(contacts)} (Excluding empty job titles)")
+print(f"⏳ Total Execution Time: {elapsed_time:.2f} seconds")
