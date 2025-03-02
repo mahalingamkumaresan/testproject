@@ -1,7 +1,9 @@
-import time
-import random
-import pandas as pd
+import concurrent.futures
 from exchangelib import Credentials, Account
+import pandas as pd
+import time
+import random  # ✅ Introduce delays
+import re  # ✅ Extract Standard ID
 
 # Set your Exchange credentials
 EMAIL = "your.email@company.com"
@@ -24,6 +26,13 @@ except Exception as e:
     print(f"❌ ERROR: Unable to connect to Exchange. {e}")
     exit()
 
+# Function to extract Standard ID from name format "LastName, FirstName STANDARDID"
+def extract_standard_id(name):
+    if name and isinstance(name, str):
+        match = re.search(r'\b(\w+)$', name)  # Extracts last word (Standard ID)
+        return match.group(1) if match else "N/A"
+    return "N/A"
+
 # ✅ Function to log skipped entries with reason
 def log_skipped(reason, user_data="N/A"):
     message = f"⚠️ Skipping entry: {reason} | Data: {user_data}"
@@ -31,67 +40,108 @@ def log_skipped(reason, user_data="N/A"):
     with open(SKIP_LOG_FILE, "a", encoding="utf-8") as log_file:
         log_file.write(message + "\n")  # Log to file
 
-# ✅ Function to fetch all contacts using `FindPeople`
-def fetch_contacts(account, page_size=100):
+# ✅ Function to fetch contacts with pagination instead of AA, AB, AC...
+def fetch_all_contacts():
+    """Fetch all contacts in batches without manually forming queries like AA, AB, etc."""
     contacts = []
-    offset = 0  # ✅ Offset for pagination
+    batch_size = 100  # ✅ Fetch 100 contacts per call
+    offset = 0
 
     while True:
-        print(f"📌 Fetching batch {offset // page_size + 1} (Offset: {offset}) ...")
-        
-        # ✅ Add a delay to prevent server overload
-        time.sleep(random.uniform(0.5, 2))
+        try:
+            print(f"📌 Fetching batch {offset // batch_size + 1} (Offset: {offset}) ...")
+            time.sleep(random.uniform(0.5, 2))  # ✅ Add random delay to prevent server overload
 
-        # ✅ Fetch contacts in paginated manner
-        items = account.contacts.filter().order_by('display_name')[offset:offset + page_size]
-        
-        # ✅ Stop if no more records are found
-        if not items:
+            resolved_names = account.protocol.resolve_names(
+                "",  # ✅ Empty string fetches all contacts
+                return_full_contact_data=True,
+                max_entries=batch_size
+            )
+
+            if not resolved_names:
+                break  # ✅ Stop if no more contacts are returned
+
+            for user in resolved_names:
+                email = "N/A"
+                display_name = "N/A"
+                standard_id = "N/A"
+                job_title = department = city = country = zip_code = manager_name = manager_standard_id = "N/A"
+                direct_reports_count = 0
+
+                if isinstance(user, tuple) and len(user) >= 2:  # ✅ Normal Case (Tuple User)
+                    email = user[0].email_address if hasattr(user[0], "email_address") else "N/A"
+                    
+                    # ✅ Skip duplicate records
+                    if email in processed_emails:
+                        continue
+                    processed_emails.add(email)
+
+                    display_name = user[1].display_name if hasattr(user[1], "display_name") else "N/A"
+                    standard_id = extract_standard_id(user[0].name) if hasattr(user[0], "name") else "N/A"
+
+                    job_title = str(user[1].job_title).strip() if hasattr(user[1], "job_title") and user[1].job_title else "N/A"
+                    if job_title == "N/A":
+                        log_skipped("Job Title is empty", user[1].display_name)
+                        continue  
+
+                    department = str(user[1].department).strip() if hasattr(user[1], "department") and user[1].department else "N/A"
+
+                    if hasattr(user[1], "physical_addresses") and isinstance(user[1].physical_addresses, tuple) and len(user[1].physical_addresses) > 0:
+                        address = user[1].physical_addresses[0]
+                        city = str(address.city).strip() if hasattr(address, "city") and address.city else "N/A"
+                        country = str(address.country).strip() if hasattr(address, "country") and address.country else "N/A"
+                        zip_code = str(address.zipcode).strip() if hasattr(address, "zipcode") and address.zipcode else "N/A"
+
+                    manager_name = str(user[1].manager).strip() if hasattr(user[1], "manager") and user[1].manager else "N/A"
+                    manager_standard_id = extract_standard_id(manager_name)
+
+                    direct_reports_count = len(user[1].direct_reports) if hasattr(user[1], "direct_reports") and isinstance(user[1].direct_reports, tuple) else 0
+
+                else:  # ✅ Handle Non-Tuple Users
+                    print(f"⚠️ User is not a tuple. Processing with limited data: {user}")
+                    email = user.email_address if hasattr(user, "email_address") else "N/A"
+
+                    # ✅ Skip duplicate records
+                    if email in processed_emails:
+                        continue
+                    processed_emails.add(email)
+
+                    display_name = user.name if hasattr(user, "name") else "N/A"
+                    standard_id = extract_standard_id(user.name) if hasattr(user, "name") else "N/A"
+
+                contacts.append([
+                    display_name, standard_id, email, job_title, department,
+                    city, country, zip_code, manager_name, manager_standard_id, direct_reports_count
+                ])
+
+            print(f"✅ Processed batch {offset // batch_size + 1} ({len(resolved_names)} records)")
+
+            offset += batch_size  # ✅ Move to the next batch
+
+        except Exception as e:
+            log_skipped(f"Unexpected error: {e}")
             break
-
-        for item in items:
-            email = item.email_addresses[0] if item.email_addresses else "N/A"
-
-            # ✅ Skip duplicate records
-            if email in processed_emails:
-                continue
-            processed_emails.add(email)
-
-            # ✅ Extract all required fields
-            display_name = item.display_name if item.display_name else "N/A"
-            job_title = item.job_title if item.job_title else "N/A"
-            department = item.department if item.department else "N/A"
-            city = item.physical_addresses[0].city if item.physical_addresses else "N/A"
-            country = item.physical_addresses[0].country if item.physical_addresses else "N/A"
-            zip_code = item.physical_addresses[0].zipcode if item.physical_addresses else "N/A"
-            manager_name = item.manager if item.manager else "N/A"
-
-            contacts.append([
-                display_name, email, job_title, department, city, country, zip_code, manager_name
-            ])
-
-        # ✅ Move to the next batch
-        offset += page_size
 
     return contacts
 
 # Fetch all contacts using pagination
 start_time = time.time()
-contacts = fetch_contacts(account)
+contacts = fetch_all_contacts()
 
 # Convert to DataFrame
 df = pd.DataFrame(contacts, columns=[
-    "Display Name", "Email", "Job Title", "Department",
-    "City", "Country", "Zip Code", "Manager Name"
+    "Display Name", "Standard ID", "Email", "Job Title", "Department",
+    "City", "Country", "Zip Code", "Manager Name", "Manager Standard ID", "Direct Reports Count"
 ])
 
 # Save to CSV
-output_file = "C:\\Users\\Public\\GAL_FindPeople_Contacts.csv"
+output_file = "C:\\Users\\Public\\GAL_EWS_Contacts.csv"
 df.to_csv(output_file, index=False, encoding="utf-8")
 
 # Print execution summary
 elapsed_time = time.time() - start_time
 print(f"\n✅ Export completed successfully! Data saved to {output_file}")
-print(f"🔹 Total Valid Records Processed: {len(contacts)}")
+print(f"🔹 Total Valid Records Processed: {len(contacts)} (Excluding empty job titles)")
 print(f"⏳ Total Execution Time: {elapsed_time:.2f} seconds")
 print(f"⚠️ Skipped entries logged in: {SKIP_LOG_FILE}")
+qqq
