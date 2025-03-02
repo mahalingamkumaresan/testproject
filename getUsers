@@ -185,3 +185,35 @@ SkipRecord:
     logFile.WriteLine "Export completed successfully!"
     logFile.Close
 End Sub
+
+
+# PowerShell script to extract Global Address List (GAL) data via Outlook
+$OutputPath = "C:\Users\Public\GAL_Contacts.csv"
+
+# Open Outlook COM object
+$outlook = New-Object -ComObject Outlook.Application
+$namespace = $outlook.GetNamespace("MAPI")
+$gal = $namespace.AddressLists | Where-Object { $_.Name -eq "Global Address List" }
+
+# Prepare CSV data
+$contacts = @()
+foreach ($entry in $gal.AddressEntries) {
+    $user = $entry.GetExchangeUser()
+    if ($user) {
+        $contacts += [PSCustomObject]@{
+            FullName = $user.Name
+            Email = $user.PrimarySmtpAddress
+            JobTitle = $user.JobTitle
+            Department = $user.Department
+            WorkPhone = $user.BusinessTelephoneNumber
+            Mobile = $user.MobileTelephoneNumber
+            OfficeLocation = $user.OfficeLocation
+            Manager = if ($user.Manager) { $user.Manager.Name } else { "N/A" }
+        }
+    }
+}
+
+# Export to CSV
+$contacts | Export-Csv -Path $OutputPath -NoTypeInformation
+Write-Host "Export completed! Data saved to $OutputPath"
+
