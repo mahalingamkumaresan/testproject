@@ -1,0 +1,12 @@
+teamMembershq_data_grouped = (
+    teamMembershq_data
+    .groupby("Author Email")["Team"]
+    .agg(lambda x: ", ".join(x))  # Combine multiple team names into a single string
+    .reset_index()
+)
+
+merged_data = merged_data.merge(
+    teamMembershq_data_grouped,
+    on="Author Email",
+    how="left"
+)
