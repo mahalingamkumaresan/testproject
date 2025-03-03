@@ -1,12 +1,21 @@
+# Group only the 'Team' column while keeping 'HR Role' and 'Team Member City' intact
 teamMembershq_data_grouped = (
     teamMembershq_data
-    .groupby("Author Email")["Team"]
-    .agg(lambda x: ", ".join(x))  # Combine multiple team names into a single string
+    .groupby("Author Email")
+    .agg({
+        "HR Role": "first",  # Take the first occurrence (since it's the same)
+        "Team Member City": "first",  # Take the first occurrence (same city)
+        "Team": lambda x: ", ".join(x)  # Combine multiple teams
+    })
     .reset_index()
 )
 
+# Merge with merged_data
 merged_data = merged_data.merge(
     teamMembershq_data_grouped,
     on="Author Email",
     how="left"
 )
+
+# Fill missing team values with "No Teams"
+merged_data["Team"] = merged_data["Team"].fillna("No Teams")
