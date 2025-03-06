@@ -1,0 +1,84 @@
+import pandas as pd
+from collections import Counter
+
+# Define language mapping based on file extensions
+LANGUAGE_MAPPING = {
+    "java": "Java",
+    "py": "Python",
+    "js": "JavaScript",
+    "jsx": "JavaScript",
+    "ts": "TypeScript",
+    "tsx": "TypeScript",
+    "cs": "C#",
+    "cpp": "C++",
+    "h": "C++",
+    "rb": "Ruby",
+    "php": "PHP",
+    "go": "Go",
+    "swift": "Swift",
+    "kt": "Kotlin",
+    "sql": "SQL",
+    "sh": "Shell Script",
+    "html": "HTML",
+    "css": "CSS"
+}
+
+# Define framework mapping based on known file names
+FRAMEWORK_MAPPING = {
+    "package.json": "React / Vue / Angular (check manually)",
+    "angular.json": "Angular",
+    "vue.config.js": "Vue.js",
+    "manage.py": "Django",
+    "requirements.txt": "Django / Flask",
+    "app.py": "Flask",
+    "pom.xml": "Spring Boot",
+    "application.properties": "Spring Boot",
+    "startup.cs": ".NET Core",
+    "program.cs": ".NET Core",
+    "csproj": ".NET Core",
+    "composer.json": "Laravel / PHP",
+    "Gemfile": "Ruby on Rails",
+    "routes.rb": "Ruby on Rails",
+    "server.js": "Express.js",
+    "routes.js": "Express.js",
+    "app.js": "Express.js"
+}
+
+# Ensure column names exist in the dataframe
+required_columns = ["SPK", "Repo Slug", "File Name"]
+for col in required_columns:
+    if col not in enriched_Data.columns:
+        raise ValueError(f"Missing required column: {col}")
+
+# Extract file extensions and count occurrences per repo
+enriched_Data["File Extension"] = enriched_Data["File Name"].apply(lambda x: x.split('.')[-1] if '.' in x else "unknown")
+
+# Group by repo and calculate primary language & framework
+repo_language = {}
+repo_framework = {}
+
+for repo, group in enriched_Data.groupby(["SPK", "Repo Slug"]):
+    file_extensions = group["File Extension"].tolist()
+    
+    # Identify the primary language
+    extension_counts = Counter(file_extensions)
+    most_common_ext = max(extension_counts, key=extension_counts.get)
+    primary_language = LANGUAGE_MAPPING.get(most_common_ext, "Unknown")
+    
+    # Identify the likely framework based on file names
+    framework_found = set()
+    for file in group["File Name"]:
+        if file in FRAMEWORK_MAPPING:
+            framework_found.add(FRAMEWORK_MAPPING[file])
+    
+    likely_framework = ", ".join(framework_found) if framework_found else "Unknown"
+    
+    # Store results
+    repo_language[repo] = primary_language
+    repo_framework[repo] = likely_framework
+
+# Map the results back to the dataframe
+enriched_Data["Primary Language"] = enriched_Data.apply(lambda row: repo_language.get((row["SPK"], row["Repo Slug"]), "Unknown"), axis=1)
+enriched_Data["Likely Framework"] = enriched_Data.apply(lambda row: repo_framework.get((row["SPK"], row["Repo Slug"]), "Unknown"), axis=1)
+
+print("Primary Language and Likely Framework columns added successfully.")
