@@ -1,0 +1,222 @@
+import re
+import pandas as pd
+import requests
+import orjson  # Faster JSON processing
+from openpyxl import load_workbook, Workbook
+import csv
+from datetime import datetime
+import logging
+import zipfile
+import math
+import os
+import time
+import json
+from pygments.lexers import guess_lexer_for_filename
+from pygments.util import ClassNotFound
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, Semaphore
+from logging.handlers import RotatingFileHandler
+import urllib3
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Bitbucket API credentials and configuration
+BITBUCKET_BASE_URL = os.getenv('BITBUCKET_BASE_URL', 'https://scm.horizon.bankofamerica.com/rest/api/latest')
+BITBUCKET_USERNAME = os.getenv('BITBUCKET_USERNAME', '')
+BITBUCKET_APP_PASSWORD = os.getenv('BITBUCKET_APP_PASSWORD', '')
+
+# Setup logging with rotation
+log_handler = RotatingFileHandler("BB_data.log", maxBytes=5*1024*1024, backupCount=3)
+logging.basicConfig(handlers=[log_handler], level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# Semaphore to limit concurrent API calls
+api_semaphore = Semaphore(50)
+
+# File type cache for Pygments
+FILE_TYPE_CACHE = {}
+
+# Function to identify file type using Pygments
+def identify_file_type(file_name, use_pygments=False):
+    if use_pygments:
+        if file_name in FILE_TYPE_CACHE:
+            return FILE_TYPE_CACHE[file_name]
+        try:
+            lexer = guess_lexer_for_filename(file_name, "")
+            FILE_TYPE_CACHE[file_name] = lexer.name
+            return lexer.name
+        except ClassNotFound:
+            return "Unknown"
+    return "Not Used"
+
+# Function to retry API requests with exponential backoff
+def make_request_with_retry(url, retries=3, delay=2):
+    with api_semaphore:
+        for attempt in range(retries):
+            try:
+                logging.debug(f"Requesting: {url} (Attempt {attempt + 1}/{retries})")
+                response = requests.get(url, auth=(BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD), verify=False)
+                response.raise_for_status()
+                return response, None
+            except requests.exceptions.RequestException as e:
+                error_message = str(e)
+                logging.error(f"Error on {url}: {error_message} (Attempt {attempt + 1}/{retries})")
+                if attempt < retries - 1:
+                    time.sleep(delay * (2 ** attempt))  # Exponential backoff
+                else:
+                    return None, error_message
+
+# Function to parse diff and calculate lines modified
+def parse_diff(file_name, diff_text):
+    """
+    Parses the diff text to count lines added, removed, and modified.
+    """
+    lines_added = 0
+    lines_removed = 0
+    lines_modified = 0
+
+    try:
+        diff_data = json.loads(diff_text)
+        for diff in diff_data.get('diffs', []):
+            destination_name = diff.get('destination', {}).get('name')
+            source_name = diff.get('source', {}).get('name') if diff.get('source') else None
+
+            if file_name not in {destination_name, source_name}:
+                continue
+            
+            removed_lines = {}
+            added_lines = {}
+
+            # Process each hunk in the diff
+            for hunk in diff.get('hunks', []):
+                for segment in hunk.get('segments', []):
+                    if segment.get('type') == 'REMOVED':
+                        for line in segment.get('lines', []):
+                            line_number = line.get('source')
+                            removed_lines[line_number] = line.get('line', '').strip()
+                            lines_removed += 1
+
+                    elif segment.get('type') == 'ADDED':
+                        for line in segment.get('lines', []):
+                            line_number = line.get('destination')
+                            added_lines[line_number] = line.get('line', '').strip()
+                            lines_added += 1
+            
+            # Detect modified lines by comparing REMOVED and ADDED
+            for removed_key, removed_line in removed_lines.items():
+                if removed_key in added_lines and added_lines[removed_key] != removed_line:
+                    lines_modified += 1
+                    lines_added -= 1
+                    lines_removed -= 1
+
+    except Exception as e:
+        logging.error(f"Error parsing diff: {e}")
+
+    return lines_added, lines_removed, lines_modified
+
+# Function to fetch and process commit details from Bitbucket
+def get_commits(df, BITBUCKET_BASE_URL, use_pygments=False):
+    if df.empty:
+        logging.warning("Input file is empty! Exiting.")
+        return pd.DataFrame(), pd.DataFrame()
+    
+    failed_urls = []
+    commit_details = []
+
+    def process_commit(index, row):
+        commit_id = row['COMMIT ID']
+        project_key = row['SPK']
+        repo_slug = row['REPOSITORY NAME']
+        file_changes_url = f"{BITBUCKET_BASE_URL}/projects/{project_key}/repos/{repo_slug}/commits/{commit_id}?expand=author,parents"
+        file_response, error_reason = make_request_with_retry(file_changes_url)
+
+        if file_response:
+            file_data = orjson.loads(file_response.text)
+            author_name = file_data.get('author', {}).get('name', 'Unknown')
+            author_email = file_data.get('author', {}).get('emailAddress', 'Unknown')
+            committer_name = file_data.get('committer', {}).get('name', 'Unknown')
+            committer_email = file_data.get('committer', {}).get('emailAddress', 'Unknown')
+            commit_month_year = datetime.utcfromtimestamp(file_data.get('committerTimestamp', 0) / 1000).strftime('%m-%Y')
+            branch_name = file_data.get('branches', [{}])[0].get('name', 'Unknown')  # Assuming branch name is available
+            is_merge_commit = len(file_data.get('parents', [])) > 1  # Check if it's a merge commit
+            
+            for change in file_data.get('diffs', []):
+                file_name = change.get('source', {}).get('name', 'Unknown')
+                file_type = identify_file_type(file_name, use_pygments)
+                lines_added, lines_removed, lines_modified = parse_diff(file_name, json.dumps(file_data))
+                
+                commit_details.append({
+                    "commit_id": commit_id,
+                    "project_key": project_key,
+                    "repo_slug": repo_slug,
+                    "author_name": author_name,
+                    "author_email": author_email,
+                    "committer_name": committer_name,
+                    "committer_email": committer_email,
+                    "commit_month_year": commit_month_year,
+                    "branch_name": branch_name,
+                    "is_merge_commit": is_merge_commit,
+                    "file_name": file_name,
+                    "file_type": file_type,
+                    "lines_added": lines_added,
+                    "lines_removed": lines_removed,
+                    "lines_modified": lines_modified
+                })
+        else:
+            failed_urls.append((file_changes_url, error_reason))
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        executor.map(lambda x: process_commit(*x), df.iterrows())
+    
+    return pd.DataFrame(commit_details), pd.DataFrame(failed_urls, columns=["Failed URL", "Reason"]) if failed_urls else pd.DataFrame()
+
+# Function to group commit data
+def group_commit_data(commit_df):
+    """
+    Groups commit data based on specified columns and calculates total commits per author per file per month.
+    """
+    if commit_df.empty:
+        return pd.DataFrame()
+    
+    # Group by the specified columns
+    grouped_df = commit_df.groupby([
+        'project_key', 'repo_slug', 'author_name', 'author_email', 'committer_name', 
+        'committer_email', 'commit_month_year', 'branch_name', 'is_merge_commit', 
+        'file_name', 'file_type'
+    ]).agg({
+        'lines_added': 'sum',
+        'lines_removed': 'sum',
+        'lines_modified': 'sum',
+        'commit_id': 'count'  # Count the number of commits for each group
+    }).reset_index()
+
+    # Rename the commit_id column to total_commits
+    grouped_df.rename(columns={'commit_id': 'total_commits'}, inplace=True)
+    
+    return grouped_df
+
+# Main function
+def main():
+    input_folder = "C:/Users/zkiptek/Desktop/20Feb2025SelectedCommitIds/input"
+    output_folder = "C:/Users/zkiptek/Desktop/20Feb2025SelectedCommitIds/output"
+    os.makedirs(output_folder, exist_ok=True)
+
+    df = pd.read_excel(os.path.join(input_folder, 'CommitInputs.xlsx'))
+    use_pygments = os.getenv('USE_PYGMENTS', 'False').lower() == 'true'
+    logging.info(f"Processing {len(df)} commits from input file.")
+
+    commit_df, failed_urls_df = get_commits(df, BITBUCKET_BASE_URL, use_pygments)
+    grouped_commit_df = group_commit_data(commit_df)
+
+    if not grouped_commit_df.empty:
+        grouped_commit_df.to_excel(os.path.join(output_folder, 'grouped_commit_df.xlsx'), index=False)
+    if not failed_urls_df.empty:
+        failed_urls_df.to_excel(os.path.join(output_folder, 'failed_urls.xlsx'), index=False)
+    
+    logging.info("Processing completed")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        logging.error(f"Unexpected error: {str(e)}", exc_info=True)
