@@ -32,7 +32,7 @@ BITBUCKET_BASE_URL = os.getenv("BITBUCKET_BASE_URL", "https://scm.horizon.bankof
 BITBUCKET_USERNAME = os.getenv("BITBUCKET_USERNAME", "")
 BITBUCKET_APP_PASSWORD = os.getenv("BITBUCKET_APP_PASSWORD", "")
 
-# Flag: if True, output is merged into the input Excel file (and grouping is disabled);
+# Flag: if True, output is merged into the input file (and grouping is disabled);
 # if False, results are written to a separate output file.
 WRITE_SAME_FILE = True
 
@@ -137,7 +137,6 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
         return pd.DataFrame(), pd.DataFrame()
     failed_urls = []
     commit_details = []
-
     def process_commit(index: int, row: pd.Series) -> None:
         try:
             commit_id = row["COMMIT_ID"]
@@ -150,12 +149,11 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
             commit_date = pd.to_datetime(row["COMMIT_DATE"])
             commit_month_year = commit_date.strftime("%m-%Y")
             is_merge_commit = (commit_type == "merge")
-
-            # Use the diff URL for both merge and non-merge cases:
+            # Use the diff URL for both cases.
             file_changes_url = f"{base_url}/projects/{spk}/repos/{repository_name}/commits/{commit_id}/diff?ignore_whitespace=true"
             file_response, error_reason = make_request_with_retry(file_changes_url)
             if is_merge_commit:
-                # For merge, capture committer details (if available) from the response
+                # For merge commits, capture committer details.
                 if file_response:
                     try:
                         file_data = orjson.loads(file_response.text)
@@ -163,7 +161,6 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
                         logging.error(f"Error decoding JSON for merge commit {commit_id}: {e}. URL: {file_changes_url}")
                         failed_urls.append((file_changes_url, str(e)))
                         file_data = {}
-                    # Attempt to get committer info; if not available, fall back to input values.
                     committer_name = file_data.get("committer", {}).get("name")
                     committer_email = file_data.get("committer", {}).get("emailAddress")
                     if not committer_name or not committer_email:
@@ -193,10 +190,10 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
                     "FILE_TYPE": "N/A",
                     "LINES_ADDED": 0,
                     "LINES_REMOVED": 0,
-                    "LINES_MODIFIED": 0
+                    "LINES_MODIFIED": 0,
+                    "DIFF_URL": file_changes_url
                 })
             else:
-                # Non-merge: use input author details.
                 if file_response:
                     try:
                         file_data = orjson.loads(file_response.text)
@@ -228,7 +225,8 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
                             "FILE_TYPE": file_type,
                             "LINES_ADDED": la,
                             "LINES_REMOVED": lr,
-                            "LINES_MODIFIED": lm
+                            "LINES_MODIFIED": lm,
+                            "DIFF_URL": file_changes_url
                         })
                 else:
                     error_msg = f"{error_reason}. Full URL: {file_changes_url}"
@@ -263,7 +261,8 @@ def group_commit_data(commit_df: pd.DataFrame) -> pd.DataFrame:
             "LINES_ADDED": "sum",
             "LINES_REMOVED": "sum",
             "LINES_MODIFIED": "sum",
-            "COMMIT_ID": "count"
+            "COMMIT_ID": "count",
+            "DIFF_URL": lambda x: "; ".join(x.astype(str).unique())
         }).reset_index()
         grouped_df.rename(columns={"COMMIT_ID": "GROUP_COMMITS"}, inplace=True)
         total_df = commit_df.groupby(["AUTHOR_NAME", "COMMIT_MONTH_YEAR", "FILE_NAME"])["COMMIT_ID"]\
@@ -292,7 +291,8 @@ def aggregate_by_commit_id(commit_df: pd.DataFrame) -> pd.DataFrame:
         "FILE_TYPE": lambda x: "; ".join(x.astype(str).unique()),
         "LINES_ADDED": "sum",
         "LINES_REMOVED": "sum",
-        "LINES_MODIFIED": "sum"
+        "LINES_MODIFIED": "sum",
+        "DIFF_URL": lambda x: "; ".join(x.astype(str).unique())
     }
     aggregated = commit_df.groupby("COMMIT_ID").agg(agg_funcs).reset_index()
     return aggregated
@@ -308,7 +308,6 @@ def main() -> None:
         commit_df, failed_urls_df = get_commits(df, BITBUCKET_BASE_URL, use_pygments)
 
         if WRITE_SAME_FILE:
-            # In same-file mode, aggregate by commit id and merge (extend) the original input sheet.
             aggregated_df = aggregate_by_commit_id(commit_df)
             merged_df = pd.merge(df, aggregated_df, on="COMMIT_ID", how="left")
             with pd.ExcelWriter(input_file, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
@@ -338,3 +337,4 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         logging.error(f"Script terminated due to unexpected error: {e}", exc_info=True)
+#
