@@ -5,7 +5,6 @@ from datetime import datetime
 import logging
 import os
 import time
-import json
 from pygments.lexers import guess_lexer_for_filename
 from pygments.util import ClassNotFound
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -41,7 +40,6 @@ logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler]
 
 FILE_TYPE_CACHE: Dict[str, str] = {}
 
-# Token Bucket Implementation
 class TokenBucket:
     def __init__(self, capacity: int, tokens_per_second: float):
         self.capacity = capacity
@@ -106,7 +104,7 @@ def make_request_with_retry(url: str, retries: int = 3, delay: int = 2) -> Tuple
                     else:
                         return None, error_message
                 else:
-                    logging.error(f"Error on {url}: {error_message} (Status code: {status})")
+                    logging.error(f"Error on {url}: {error_message} (Status: {status})")
                     return None, error_message
             else:
                 logging.error(f"Error on {url}: {error_message} (No response object)")
@@ -115,17 +113,20 @@ def make_request_with_retry(url: str, retries: int = 3, delay: int = 2) -> Tuple
 
 def process_diff(diff: Dict[str, Any], file_name: str) -> Tuple[int, int, int]:
     try:
-        if diff.get("binary", False) or diff.get("source", {}).get("truncated", False):
+        source_info = diff.get("source")
+        if not source_info:
+            source_info = diff.get("destination", {})
+        if diff.get("binary", False) or source_info.get("truncated", False):
             return 0, 0, 0
         lines_added = 0
         lines_removed = 0
         lines_modified = 0
         removed_lines: Dict[Any, str] = {}
         added_lines: Dict[Any, str] = {}
-        dest = diff.get("destination", {})
-        src = diff.get("source", {}) or diff.get("destination", {})  # If source is null, use destination.
-        src_name = src.get("name", "UNKNOWN")
-        # Use file_name passed in should equal src_name ideally; if not, we can still process.
+        dest_name = diff.get("destination", {}).get("name", "UNKNOWN")
+        source_name = source_info.get("name", "UNKNOWN")
+        if file_name not in {dest_name, source_name}:
+            return 0, 0, 0
         for hunk in diff.get("hunks", []):
             for segment in hunk.get("segments", []):
                 seg_type = segment.get("type")
@@ -146,7 +147,7 @@ def process_diff(diff: Dict[str, Any], file_name: str) -> Tuple[int, int, int]:
                 lines_removed -= 1
         return lines_added, lines_removed, lines_modified
     except Exception as e:
-        logging.error(f"process_diff error for commit (file: {file_name}) at diff URL: {file_name}. Error: {e}")
+        logging.error(f"process_diff error for commit (file: {file_name}). Diff: {diff}. Error: {e}")
         return 0, 0, 0
 
 def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -318,8 +319,7 @@ def generate_language_mapping(commit_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     mapping = commit_df.copy()
     mapping["EXTENSION"] = mapping["FILE_NAME"].apply(lambda x: x.split('.')[-1].lower() if '.' in x else "no_ext")
-    mapping = mapping[["EXTENSION", "FILE_TYPE"]]
-    mapping = mapping.drop_duplicates().reset_index(drop=True)
+    mapping = mapping[["EXTENSION", "FILE_TYPE"]].drop_duplicates().reset_index(drop=True)
     return mapping
 
 def main() -> None:
@@ -368,3 +368,4 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         logging.error(f"Script terminated due to unexpected error: {e}", exc_info=True)
+##############################################################
