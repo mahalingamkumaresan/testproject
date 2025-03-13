@@ -9,7 +9,7 @@ from pygments.util import ClassNotFound
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
 from pathlib import Path
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Dict, Any
 from logging.handlers import RotatingFileHandler
 import threading
 
@@ -20,7 +20,9 @@ input_folder = processing_folder / "input"
 output_folder = processing_folder / "output"
 output_folder.mkdir(parents=True, exist_ok=True)
 
-BITBUCKET_BASE_URL = os.getenv("BITBUCKET_BASE_URL", "https://scm.horizon.bankofamerica.com/rest/api/latest")
+BITBUCKET_BASE_URL = (
+    os.getenv("BITBUCKET_BASE_URL", "https://scm.horizon.bankofamerica.com/rest/api/latest")
+)
 BITBUCKET_USERNAME = os.getenv("BITBUCKET_USERNAME", "")
 BITBUCKET_APP_PASSWORD = os.getenv("BITBUCKET_APP_PASSWORD", "")
 
@@ -29,7 +31,7 @@ use_pygments = True
 
 log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 log_file = output_folder / "BB_data.log"
-file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3)
+file_handler = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3)
 file_handler.setFormatter(log_formatter)
 file_handler.setLevel(logging.INFO)
 console_handler = logging.StreamHandler()
@@ -39,7 +41,7 @@ logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler]
 
 FILE_TYPE_CACHE: Dict[str, str] = {}
 
-# Token Bucket implementation
+# Token Bucket for rate limiting
 class TokenBucket:
     def __init__(self, capacity: int, tokens_per_second: float):
         self.capacity = capacity
@@ -47,6 +49,7 @@ class TokenBucket:
         self.tokens = capacity
         self.last_refill = time.time()
         self.lock = threading.Lock()
+
     def consume(self, tokens: int = 1):
         while True:
             with self.lock:
@@ -64,7 +67,7 @@ class TokenBucket:
 token_bucket = TokenBucket(capacity=50, tokens_per_second=3)
 
 session = requests.Session()
-session.auth = (BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD)
+session.auth = (BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD)  # Basic Authentication
 session.verify = False
 
 def identify_file_type(file_name: str, use_pygments: bool = False) -> str:
@@ -113,20 +116,22 @@ def make_request_with_retry(url: str, retries: int = 3, delay: int = 2) -> Tuple
 
 def process_diff(diff: Dict[str, Any], file_name: str) -> Tuple[int, int, int]:
     try:
-        src_info = diff.get("source") or {}
-        dest_info = diff.get("destination") or {}
-        # Use destination if source is missing
-        if not src_info.get("truncated", False) and dest_info.get("truncated", False):
-            src_info = dest_info
-        if diff.get("binary", False) or src_info.get("truncated", False):
+        source_info = diff.get("source") or {}
+        destination_info = diff.get("destination") or {}
+        # If source is empty, use destination; this covers new files.
+        file_name_val = source_info.get("name") or destination_info.get("name") or "UNKNOWN"
+        # Determine if the diff is truncated. If source doesn't have "truncated", check destination.
+        truncated = source_info.get("truncated")
+        if truncated is None:
+            truncated = destination_info.get("truncated", False)
+        if diff.get("binary", False) or truncated:
             return 0, 0, 0
         lines_added = 0
         lines_removed = 0
         lines_modified = 0
         removed_lines: Dict[Any, str] = {}
         added_lines: Dict[Any, str] = {}
-        # Get file name from source, or if missing, from destination
-        file_name_val = src_info.get("name") or dest_info.get("name") or "UNKNOWN"
+        # We expect file_name to equal file_name_val; if not, return zeros.
         if file_name not in {file_name_val}:
             return 0, 0, 0
         for hunk in diff.get("hunks", []):
@@ -149,7 +154,7 @@ def process_diff(diff: Dict[str, Any], file_name: str) -> Tuple[int, int, int]:
                 lines_removed -= 1
         return lines_added, lines_removed, lines_modified
     except Exception as e:
-        logging.error(f"process_diff error for commit (file: {file_name}). Diff: {diff}. Error: {e}")
+        logging.error(f"process_diff error for file {file_name}. Diff: {diff}. Error: {e}")
         return 0, 0, 0
 
 def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -228,7 +233,9 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
                         failed_urls.append((file_changes_url, commit_id, reason))
                         return
                     for diff in diffs:
-                        file_name_val = diff.get("source", {}).get("name") or diff.get("destination", {}).get("name", "UNKNOWN")
+                        source_info = diff.get("source") or {}
+                        destination_info = diff.get("destination") or {}
+                        file_name_val = source_info.get("name") or destination_info.get("name") or "UNKNOWN"
                         file_type = identify_file_type(file_name_val, use_pygments)
                         try:
                             la, lr, lm = process_diff(diff, file_name_val)
@@ -259,7 +266,6 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
                     failed_urls.append((file_changes_url, commit_id, error_msg))
         except Exception as e:
             logging.error(f"Error processing commit at index {index} (COMMIT_ID: {row.get('COMMIT_ID', 'UNKNOWN')}, URL: {file_changes_url}): {e}")
-
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = [executor.submit(process_commit, idx, row) for idx, row in df.iterrows()]
         for i, _ in enumerate(as_completed(futures), start=1):
@@ -370,3 +376,4 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         logging.error(f"Script terminated due to unexpected error: {e}", exc_info=True)
+#!
