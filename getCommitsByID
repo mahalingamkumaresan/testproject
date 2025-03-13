@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+
 import re
 import pandas as pd
 import requests
@@ -16,22 +16,28 @@ from pygments.lexers import guess_lexer_for_filename
 from pygments.util import ClassNotFound
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from logging.handlers import RotatingFileHandler
 import urllib3
 from pathlib import Path
 from typing import Tuple, Optional, Dict, Any
+from logging.handlers import RotatingFileHandler
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Define processing folder (both input and output folders exist here)
+processing_folder = Path("C:/Users/zkiptek/Desktop/20Feb2025SelectedCommitIds")
+input_folder = processing_folder / "input"
+output_folder = processing_folder / "output"
+output_folder.mkdir(parents=True, exist_ok=True)
 
 # Bitbucket API credentials and configuration
 BITBUCKET_BASE_URL = os.getenv('BITBUCKET_BASE_URL', 'https://scm.horizon.bankofamerica.com/rest/api/latest')
 BITBUCKET_USERNAME = os.getenv('BITBUCKET_USERNAME', '')
 BITBUCKET_APP_PASSWORD = os.getenv('BITBUCKET_APP_PASSWORD', '')
 
-# Setup logging with rotation to file and console.
+# Setup logging: logs are written into the output folder and printed to console.
 log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-log_file = "BB_data.log"
+log_file = output_folder / "BB_data.log"
 
 file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3)
 file_handler.setFormatter(log_formatter)
@@ -143,12 +149,12 @@ def process_diff(diff: Dict[str, Any], file_name: str) -> Tuple[int, int, int]:
 def get_commits(df: pd.DataFrame, BITBUCKET_BASE_URL: str, use_pygments: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Fetch and process commit details using metadata from the input Excel file.
-    For commits with Commit_Type of 'merge', an API call is made to retrieve committer details,
+    For commits with COMMIT_TYPE of 'merge', an API call is made to retrieve committer details,
     which are then used as the effective author information. No diff is processed for these commits.
     
-    Expected Excel columns:
-      - Person_no, Full_name, Email_ID, Commit_date, Repository_Name, Commit_Type,
-        Branch_Name, Author_NBK, Commit_ID, SPK
+    Expected standardized Excel columns:
+      - PERSON_NO, FULL_NAME, EMAIL_ID, COMMIT_DATE, REPOSITORY_NAME, COMMIT_TYPE,
+        BRANCH_NAME, AUTHOR_NBK, COMMIT_ID, SPK
     """
     if df.empty:
         logging.warning("Input file is empty! Exiting.")
@@ -159,14 +165,14 @@ def get_commits(df: pd.DataFrame, BITBUCKET_BASE_URL: str, use_pygments: bool = 
 
     def process_commit(index: int, row: pd.Series) -> None:
         try:
-            commit_id = row['Commit_ID']
+            commit_id = row['COMMIT_ID']
             project_key = row['SPK']
-            repo_slug = row['Repository_Name']
-            commit_type = str(row.get('Commit_Type', '')).strip().lower()
-            author_name = row['Full_name']
-            author_email = row['Email_ID']
-            branch_name = row['Branch_Name']
-            commit_date = pd.to_datetime(row['Commit_date'])
+            repo_slug = row['REPOSITORY_NAME']
+            commit_type = str(row.get('COMMIT_TYPE', '')).strip().lower()
+            author_name = row['FULL_NAME']
+            author_email = row['EMAIL_ID']
+            branch_name = row['BRANCH_NAME']
+            commit_date = pd.to_datetime(row['COMMIT_DATE'])
             commit_month_year = commit_date.strftime('%m-%Y')
             is_merge_commit = (commit_type == 'merge')
 
@@ -183,7 +189,6 @@ def get_commits(df: pd.DataFrame, BITBUCKET_BASE_URL: str, use_pygments: bool = 
                         file_data = {}
                     committer_name = file_data.get('committer', {}).get('name', author_name)
                     committer_email = file_data.get('committer', {}).get('emailAddress', author_email)
-                    # Use committer details as effective author info.
                     effective_author_name = committer_name
                     effective_author_email = committer_email
                 else:
@@ -231,8 +236,8 @@ def get_commits(df: pd.DataFrame, BITBUCKET_BASE_URL: str, use_pygments: bool = 
                             "repo_slug": repo_slug,
                             "author_name": author_name,
                             "author_email": author_email,
-                            "committer_name": "",  # Not provided in Excel
-                            "committer_email": "",  # Not provided in Excel
+                            "committer_name": "",  # Not provided in Excel for non-merge commits
+                            "committer_email": "",  # Not provided in Excel for non-merge commits
                             "commit_month_year": commit_month_year,
                             "branch_name": branch_name,
                             "is_merge_commit": is_merge_commit,
@@ -298,12 +303,10 @@ def group_commit_data(commit_df: pd.DataFrame) -> pd.DataFrame:
 
 def main() -> None:
     try:
-        input_folder = Path("C:/Users/zkiptek/Desktop/20Feb2025SelectedCommitIds/input")
-        output_folder = Path("C:/Users/zkiptek/Desktop/20Feb2025SelectedCommitIds/output")
-        output_folder.mkdir(parents=True, exist_ok=True)
-
         input_file = input_folder / 'CommitInputs.xlsx'
         df = pd.read_excel(input_file)
+        # Standardize all column names: remove extra spaces and convert to uppercase.
+        df.columns = [col.strip().upper() for col in df.columns]
         use_pygments = os.getenv('USE_PYGMENTS', 'False').lower() == 'true'
         logging.info(f"Processing {len(df)} commits from input file.")
 
