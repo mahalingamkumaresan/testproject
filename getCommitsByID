@@ -3,7 +3,6 @@ import requests
 import orjson
 from datetime import datetime
 import logging
-import os
 import time
 from pygments.lexers import guess_lexer_for_filename
 from pygments.util import ClassNotFound
@@ -40,6 +39,7 @@ logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler]
 
 FILE_TYPE_CACHE: Dict[str, str] = {}
 
+# Token Bucket implementation
 class TokenBucket:
     def __init__(self, capacity: int, tokens_per_second: float):
         self.capacity = capacity
@@ -96,7 +96,7 @@ def make_request_with_retry(url: str, retries: int = 3, delay: int = 2) -> Tuple
             if hasattr(e, "response") and e.response is not None:
                 status = e.response.status_code
                 if status == 401:
-                    logging.error(f"401 Unauthorized for URL {url}")
+                    logging.error(f"Received 401 Unauthorized for URL {url}")
                 if status == 429:
                     logging.error(f"Rate limit error on {url}: {error_message} (Attempt {attempt+1}/{retries})")
                     if attempt < retries - 1:
@@ -113,19 +113,21 @@ def make_request_with_retry(url: str, retries: int = 3, delay: int = 2) -> Tuple
 
 def process_diff(diff: Dict[str, Any], file_name: str) -> Tuple[int, int, int]:
     try:
-        source_info = diff.get("source")
-        if not source_info:
-            source_info = diff.get("destination", {})
-        if diff.get("binary", False) or source_info.get("truncated", False):
+        src_info = diff.get("source") or {}
+        dest_info = diff.get("destination") or {}
+        # Use destination if source is missing
+        if not src_info.get("truncated", False) and dest_info.get("truncated", False):
+            src_info = dest_info
+        if diff.get("binary", False) or src_info.get("truncated", False):
             return 0, 0, 0
         lines_added = 0
         lines_removed = 0
         lines_modified = 0
         removed_lines: Dict[Any, str] = {}
         added_lines: Dict[Any, str] = {}
-        dest_name = diff.get("destination", {}).get("name", "UNKNOWN")
-        source_name = source_info.get("name", "UNKNOWN")
-        if file_name not in {dest_name, source_name}:
+        # Get file name from source, or if missing, from destination
+        file_name_val = src_info.get("name") or dest_info.get("name") or "UNKNOWN"
+        if file_name not in {file_name_val}:
             return 0, 0, 0
         for hunk in diff.get("hunks", []):
             for segment in hunk.get("segments", []):
@@ -226,7 +228,7 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
                         failed_urls.append((file_changes_url, commit_id, reason))
                         return
                     for diff in diffs:
-                        file_name_val = diff.get("source", {}).get("name") if diff.get("source") else diff.get("destination", {}).get("name", "UNKNOWN")
+                        file_name_val = diff.get("source", {}).get("name") or diff.get("destination", {}).get("name", "UNKNOWN")
                         file_type = identify_file_type(file_name_val, use_pygments)
                         try:
                             la, lr, lm = process_diff(diff, file_name_val)
@@ -368,4 +370,3 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         logging.error(f"Script terminated due to unexpected error: {e}", exc_info=True)
-##############################################################
