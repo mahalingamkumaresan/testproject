@@ -1,20 +1,15 @@
 #!/usr/bin/env python
-import re
 import pandas as pd
 import requests
 import orjson
 from openpyxl import load_workbook, Workbook
-import csv
 from datetime import datetime
 import logging
-import zipfile
-import math
 import os
 import time
 import json
 from pygments.lexers import guess_lexer_for_filename
 from pygments.util import ClassNotFound
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
 from pathlib import Path
@@ -33,7 +28,11 @@ BITBUCKET_BASE_URL = os.getenv("BITBUCKET_BASE_URL", "https://scm.horizon.bankof
 BITBUCKET_USERNAME = os.getenv("BITBUCKET_USERNAME", "")
 BITBUCKET_APP_PASSWORD = os.getenv("BITBUCKET_APP_PASSWORD", "")
 
+# Flag: if True, extended data is merged into the input Excel file; if False, output is written to a separate file.
 WRITE_SAME_FILE = True
+
+# Set use_pygments to True by default.
+use_pygments = True
 
 log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 log_file = output_folder / "BB_data.log"
@@ -127,7 +126,7 @@ def process_diff(diff: Dict[str, Any], file_name: str) -> Tuple[int, int, int]:
                 lines_removed -= 1
         return lines_added, lines_removed, lines_modified
     except Exception as e:
-        logging.error(f"Error in process_diff for file {file_name}. Diff: {diff}. Error: {e}")
+        logging.error(f"Error in process_diff for commit (Commit ID unknown) for file {file_name} at URL: {file_name}. Diff: {diff}. Error: {e}")
         return 0, 0, 0
 
 def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -137,6 +136,7 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
     failed_urls = []
     commit_details = []
     def process_commit(index: int, row: pd.Series) -> None:
+        file_changes_url = "Not Available"
         try:
             commit_id = row["COMMIT_ID"]
             spk = row["SPK"]
@@ -149,14 +149,14 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
             commit_month_year = commit_date.strftime("%m-%Y")
             is_merge_commit = (commit_type == "merge")
             file_changes_url = f"{base_url}/projects/{spk}/repos/{repository_name}/commits/{commit_id}/diff?ignore_whitespace=true"
-            file_response, error_reason = make_request_with_retry(file_changes_url)
+            response, error_reason = make_request_with_retry(file_changes_url)
             if is_merge_commit:
-                if file_response:
+                if response:
                     try:
-                        file_data = orjson.loads(file_response.text)
+                        file_data = orjson.loads(response.text)
                     except Exception as e:
-                        logging.error(f"Error decoding JSON for merge commit {commit_id}: {e}. URL: {file_changes_url}")
-                        failed_urls.append((file_changes_url, str(e)))
+                        logging.error(f"Error decoding JSON for merge commit {commit_id} at URL {file_changes_url}: {e}")
+                        failed_urls.append((file_changes_url, f"Commit {commit_id}: {str(e)}"))
                         file_data = {}
                     committer_name = file_data.get("committer", {}).get("name")
                     committer_email = file_data.get("committer", {}).get("emailAddress")
@@ -167,17 +167,18 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
                     effective_author_email = committer_email
                 else:
                     error_msg = f"{error_reason}. Full URL: {file_changes_url}"
-                    failed_urls.append((file_changes_url, error_msg))
+                    failed_urls.append((file_changes_url, f"Commit {commit_id}: {error_msg}"))
                     effective_author_name = full_name
                     effective_author_email = email_id
+
                 commit_details.append({
                     "COMMIT_ID": commit_id,
                     "SPK": spk,
                     "REPOSITORY_NAME": repository_name,
                     "AUTHOR_NAME": effective_author_name,
                     "AUTHOR_EMAIL": effective_author_email,
-                    "COMMITTER_NAME": committer_name if file_response else "",
-                    "COMMITTER_EMAIL": committer_email if file_response else "",
+                    "COMMITTER_NAME": committer_name if response else "",
+                    "COMMITTER_EMAIL": committer_email if response else "",
                     "COMMIT_MONTH_YEAR": commit_month_year,
                     "BRANCH_NAME": branch_name,
                     "IS_MERGE_COMMIT": is_merge_commit,
@@ -190,12 +191,12 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
                     "DIFF_URL": file_changes_url
                 })
             else:
-                if file_response:
+                if response:
                     try:
-                        file_data = orjson.loads(file_response.text)
+                        file_data = orjson.loads(response.text)
                     except Exception as e:
-                        logging.error(f"Error decoding JSON for commit {commit_id}: {e}. URL: {file_changes_url}")
-                        failed_urls.append((file_changes_url, str(e)))
+                        logging.error(f"Error decoding JSON for commit {commit_id} at URL {file_changes_url}: {e}")
+                        failed_urls.append((file_changes_url, f"Commit {commit_id}: {str(e)}"))
                         return
                     for diff in file_data.get("diffs", []):
                         file_name = diff.get("source", {}).get("name", "UNKNOWN")
@@ -203,7 +204,7 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
                         try:
                             la, lr, lm = process_diff(diff, file_name)
                         except Exception as e:
-                            logging.error(f"Error processing diff for file {file_name} from URL {file_changes_url}: {e}")
+                            logging.error(f"Error processing diff for commit {commit_id} for file {file_name} at URL {file_changes_url}: {e}")
                             continue
                         commit_details.append({
                             "COMMIT_ID": commit_id,
@@ -226,9 +227,9 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
                         })
                 else:
                     error_msg = f"{error_reason}. Full URL: {file_changes_url}"
-                    failed_urls.append((file_changes_url, error_msg))
+                    failed_urls.append((file_changes_url, f"Commit {commit_id}: {error_msg}"))
         except Exception as e:
-            logging.error(f"Error processing commit at index {index}: {e}")
+            logging.error(f"Error processing commit at index {index} (COMMIT_ID: {row.get('COMMIT_ID', 'UNKNOWN')}, URL: {file_changes_url}): {e}")
     total_commits = len(df)
     processed_count = 0
     try:
@@ -296,16 +297,21 @@ def main() -> None:
         input_file = input_folder / "CommitInputs.xlsx"
         df = pd.read_excel(input_file)
         df.columns = [col.strip().upper() for col in df.columns]
-        use_pygments = os.getenv("USE_PYGMENTS", "False").lower() == "true"
         logging.info(f"Processing {len(df)} commits from input file.")
-
         commit_df, failed_urls_df = get_commits(df, BITBUCKET_BASE_URL, use_pygments)
-
         if WRITE_SAME_FILE:
+            # Add TOTAL_COMMITS column to original df based on FULL_NAME and COMMIT_DATE's month-year.
+            df["TOTAL_COMMITS"] = df.groupby(
+                ["FULL_NAME", df["COMMIT_DATE"].dt.strftime("%m-%Y")]
+            )["COMMIT_ID"].transform("count")
             aggregated_df = aggregate_by_commit_id(commit_df)
-            merged_df = pd.merge(df, aggregated_df, on="COMMIT_ID", how="left")
-            with pd.ExcelWriter(input_file, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
-                merged_df.to_excel(writer, sheet_name="Extended Data", index=False)
+            # Check if both dataframes have COMMIT_ID before merging.
+            if "COMMIT_ID" in df.columns and "COMMIT_ID" in aggregated_df.columns:
+                merged_df = pd.merge(df, aggregated_df, on="COMMIT_ID", how="left")
+                with pd.ExcelWriter(input_file, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+                    merged_df.to_excel(writer, sheet_name="Extended Data", index=False)
+            else:
+                logging.info("COMMIT_ID column missing in either input or aggregated data; skipping merge.")
             if not failed_urls_df.empty:
                 with pd.ExcelWriter(input_file, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
                     failed_urls_df.to_excel(writer, sheet_name="Failed URLs", index=False)
@@ -319,7 +325,6 @@ def main() -> None:
                     failed_urls_df.to_excel(writer, sheet_name="Failed URLs", index=False)
                 if grouped_commit_df.empty and failed_urls_df.empty:
                     pd.DataFrame({"Message": ["No data available"]}).to_excel(writer, sheet_name="Sheet1", index=False)
-
         if not failed_urls_df.empty:
             logging.info(f"Failed URLs captured: {len(failed_urls_df)}")
         logging.info("Processing completed")
@@ -331,4 +336,4 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         logging.error(f"Script terminated due to unexpected error: {e}", exc_info=True)
-####
+#
