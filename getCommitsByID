@@ -20,6 +20,7 @@ import urllib3
 from pathlib import Path
 from typing import Tuple, Optional, Dict, Any
 from logging.handlers import RotatingFileHandler
+from requests_ntlm import HttpNtlmAuth
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -32,8 +33,6 @@ BITBUCKET_BASE_URL = os.getenv("BITBUCKET_BASE_URL", "https://scm.horizon.bankof
 BITBUCKET_USERNAME = os.getenv("BITBUCKET_USERNAME", "")
 BITBUCKET_APP_PASSWORD = os.getenv("BITBUCKET_APP_PASSWORD", "")
 
-# Flag: if True, output is merged into the input file (and grouping is disabled);
-# if False, results are written to a separate output file.
 WRITE_SAME_FILE = True
 
 log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
@@ -49,7 +48,7 @@ logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler]
 FILE_TYPE_CACHE: Dict[str, str] = {}
 
 session = requests.Session()
-session.auth = (BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD)
+session.auth = HttpNtlmAuth(BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD)
 session.verify = False
 
 def identify_file_type(file_name: str, use_pygments: bool = False) -> str:
@@ -149,11 +148,9 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
             commit_date = pd.to_datetime(row["COMMIT_DATE"])
             commit_month_year = commit_date.strftime("%m-%Y")
             is_merge_commit = (commit_type == "merge")
-            # Use the diff URL for both cases.
             file_changes_url = f"{base_url}/projects/{spk}/repos/{repository_name}/commits/{commit_id}/diff?ignore_whitespace=true"
             file_response, error_reason = make_request_with_retry(file_changes_url)
             if is_merge_commit:
-                # For merge commits, capture committer details.
                 if file_response:
                     try:
                         file_data = orjson.loads(file_response.text)
@@ -173,7 +170,6 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
                     failed_urls.append((file_changes_url, error_msg))
                     effective_author_name = full_name
                     effective_author_email = email_id
-
                 commit_details.append({
                     "COMMIT_ID": commit_id,
                     "SPK": spk,
@@ -233,7 +229,6 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
                     failed_urls.append((file_changes_url, error_msg))
         except Exception as e:
             logging.error(f"Error processing commit at index {index}: {e}")
-
     total_commits = len(df)
     processed_count = 0
     try:
@@ -244,7 +239,6 @@ def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> 
                 logging.info(f"Processed commit {processed_count} of {total_commits}")
     except Exception as e:
         logging.error(f"Error during concurrent commit processing: {e}")
-
     commit_df = pd.DataFrame(commit_details)
     failed_df = pd.DataFrame(failed_urls, columns=["Failed URL", "Reason"]) if failed_urls else pd.DataFrame()
     return commit_df, failed_df
@@ -337,4 +331,4 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         logging.error(f"Script terminated due to unexpected error: {e}", exc_info=True)
-#
+####
