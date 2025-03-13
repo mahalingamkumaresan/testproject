@@ -23,7 +23,7 @@ from logging.handlers import RotatingFileHandler
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Set the processing folder
+# Adjust this as needed
 processing_folder = Path("C:/RiskPortal/13MarJavaTrainees")
 input_folder = processing_folder / "input"
 output_folder = processing_folder / "output"
@@ -43,9 +43,11 @@ log_file = output_folder / "BB_data.log"
 file_handler = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3)
 file_handler.setFormatter(log_formatter)
 file_handler.setLevel(logging.INFO)
+
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
 console_handler.setLevel(logging.INFO)
+
 logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
 
 FILE_TYPE_CACHE: Dict[str, str] = {}
@@ -64,11 +66,11 @@ def identify_file_type(file_name: str, use_pygments: bool = False) -> str:
                 FILE_TYPE_CACHE[file_name] = lexer.name
                 return lexer.name
             except ClassNotFound:
-                return "Unknown"
-        return "Not Used"
+                return "UNKNOWN"
+        return "NOT USED"
     except Exception as e:
         logging.error(f"Error in identify_file_type for {file_name}: {e}")
-        return "Unknown"
+        return "UNKNOWN"
 
 def make_request_with_retry(url: str, retries: int = 3, delay: int = 2) -> Tuple[Optional[requests.Response], Optional[str]]:
     for attempt in range(retries):
@@ -92,60 +94,67 @@ def make_request_with_retry(url: str, retries: int = 3, delay: int = 2) -> Tuple
 
 def process_diff(diff: Dict[str, Any], file_name: str) -> Tuple[int, int, int]:
     try:
-        if diff.get('binary', False) or diff.get('source', {}).get('truncated', False):
+        if diff.get("binary", False) or diff.get("source", {}).get("truncated", False):
             return 0, 0, 0
         lines_added = 0
         lines_removed = 0
         lines_modified = 0
         removed_lines: Dict[Any, str] = {}
         added_lines: Dict[Any, str] = {}
-        destination_name = diff.get('destination', {}).get('name')
-        source_name = diff.get('source', {}).get('name') if diff.get('source') else None
-        if file_name not in {destination_name, source_name}:
+
+        dest_name = diff.get("destination", {}).get("name")
+        source_name = diff.get("source", {}).get("name") if diff.get("source") else None
+        if file_name not in {dest_name, source_name}:
             return 0, 0, 0
-        for hunk in diff.get('hunks', []):
-            for segment in hunk.get('segments', []):
-                seg_type = segment.get('type')
-                if seg_type == 'REMOVED':
-                    for line in segment.get('lines', []):
-                        line_number = line.get('source')
-                        removed_lines[line_number] = line.get('line', '').strip()
+
+        for hunk in diff.get("hunks", []):
+            for segment in hunk.get("segments", []):
+                seg_type = segment.get("type")
+                if seg_type == "REMOVED":
+                    for line in segment.get("lines", []):
+                        line_number = line.get("source")
+                        removed_lines[line_number] = line.get("line", "").strip()
                         lines_removed += 1
-                elif seg_type == 'ADDED':
-                    for line in segment.get('lines', []):
-                        line_number = line.get('destination')
-                        added_lines[line_number] = line.get('line', '').strip()
+                elif seg_type == "ADDED":
+                    for line in segment.get("lines", []):
+                        line_number = line.get("destination")
+                        added_lines[line_number] = line.get("line", "").strip()
                         lines_added += 1
+
         for key, removed_line in removed_lines.items():
             if key in added_lines and added_lines[key] != removed_line:
                 lines_modified += 1
                 lines_added -= 1
                 lines_removed -= 1
+
         return lines_added, lines_removed, lines_modified
     except Exception as e:
-        logging.error(f"Error in process_diff for file {file_name}. Diff data: {diff}. Error: {e}")
+        logging.error(f"Error in process_diff for file {file_name}: {e}")
         return 0, 0, 0
 
-def get_commits(df: pd.DataFrame, BITBUCKET_BASE_URL: str, use_pygments: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def get_commits(df: pd.DataFrame, base_url: str, use_pygments: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if df.empty:
         logging.warning("Input file is empty! Exiting.")
         return pd.DataFrame(), pd.DataFrame()
+
     failed_urls = []
     commit_details = []
+
     def process_commit(index: int, row: pd.Series) -> None:
         try:
-            commit_id = row['COMMIT_ID']
-            project_key = row['SPK']
-            repo_slug = row['REPOSITORY_NAME']
-            commit_type = str(row.get('COMMIT_TYPE', '')).strip().lower()
-            author_name = row['FULL_NAME']
-            author_email = row['EMAIL_ID']
-            branch_name = row['BRANCH_NAME']
-            commit_date = pd.to_datetime(row['COMMIT_DATE'])
-            commit_month_year = commit_date.strftime('%m-%Y')
-            is_merge_commit = (commit_type == 'merge')
+            commit_id = row["COMMIT_ID"]
+            spk = row["SPK"]
+            repository_name = row["REPOSITORY_NAME"]
+            commit_type = str(row.get("COMMIT_TYPE", "")).strip().lower()
+            full_name = row["FULL_NAME"]
+            email_id = row["EMAIL_ID"]
+            branch_name = row["BRANCH_NAME"]
+            commit_date = pd.to_datetime(row["COMMIT_DATE"])
+            commit_month_year = commit_date.strftime("%m-%Y")
+            is_merge_commit = (commit_type == "merge")
+
             if is_merge_commit:
-                file_changes_url = f"{BITBUCKET_BASE_URL}/projects/{project_key}/repos/{repo_slug}/commits/{commit_id}?expand=committer"
+                file_changes_url = f"{base_url}/projects/{spk}/repos/{repository_name}/commits/{commit_id}?expand=committer"
                 file_response, error_reason = make_request_with_retry(file_changes_url)
                 if file_response:
                     try:
@@ -154,35 +163,36 @@ def get_commits(df: pd.DataFrame, BITBUCKET_BASE_URL: str, use_pygments: bool = 
                         logging.error(f"Error decoding JSON for merge commit {commit_id}: {e}")
                         failed_urls.append((file_changes_url, str(e)))
                         file_data = {}
-                    committer_name = file_data.get('committer', {}).get('name', author_name)
-                    committer_email = file_data.get('committer', {}).get('emailAddress', author_email)
+                    committer_name = file_data.get("committer", {}).get("name", full_name)
+                    committer_email = file_data.get("committer", {}).get("emailAddress", email_id)
                     effective_author_name = committer_name
                     effective_author_email = committer_email
                 else:
                     error_msg = f"{error_reason}. Full URL: {file_changes_url}"
                     failed_urls.append((file_changes_url, error_msg))
-                    effective_author_name = author_name
-                    effective_author_email = author_email
+                    effective_author_name = full_name
+                    effective_author_email = email_id
+
                 commit_details.append({
-                    "commit_id": commit_id,
-                    "project_key": project_key,
-                    "repo_slug": repo_slug,
-                    "author_name": effective_author_name,
-                    "author_email": effective_author_email,
-                    "committer_name": committer_name if file_response else "",
-                    "committer_email": committer_email if file_response else "",
-                    "commit_month_year": commit_month_year,
-                    "branch_name": branch_name,
-                    "is_merge_commit": is_merge_commit,
-                    "commit_type": commit_type,
-                    "file_name": "Merge Commit",
-                    "file_type": "N/A",
-                    "lines_added": 0,
-                    "lines_removed": 0,
-                    "lines_modified": 0
+                    "COMMIT_ID": commit_id,
+                    "SPK": spk,
+                    "REPOSITORY_NAME": repository_name,
+                    "AUTHOR_NAME": effective_author_name,
+                    "AUTHOR_EMAIL": effective_author_email,
+                    "COMMITTER_NAME": committer_name if file_response else "",
+                    "COMMITTER_EMAIL": committer_email if file_response else "",
+                    "COMMIT_MONTH_YEAR": commit_month_year,
+                    "BRANCH_NAME": branch_name,
+                    "IS_MERGE_COMMIT": is_merge_commit,
+                    "COMMIT_TYPE": commit_type,
+                    "FILE_NAME": "Merge Commit",
+                    "FILE_TYPE": "N/A",
+                    "LINES_ADDED": 0,
+                    "LINES_REMOVED": 0,
+                    "LINES_MODIFIED": 0
                 })
             else:
-                file_changes_url = f"{BITBUCKET_BASE_URL}/projects/{project_key}/repos/{repo_slug}/commits/{commit_id}/diff?ignore_whitespace=true"
+                file_changes_url = f"{base_url}/projects/{spk}/repos/{repository_name}/commits/{commit_id}/diff?ignore_whitespace=true"
                 file_response, error_reason = make_request_with_retry(file_changes_url)
                 if file_response:
                     try:
@@ -191,37 +201,39 @@ def get_commits(df: pd.DataFrame, BITBUCKET_BASE_URL: str, use_pygments: bool = 
                         logging.error(f"Error decoding JSON for commit {commit_id}: {e}")
                         failed_urls.append((file_changes_url, str(e)))
                         return
-                    for diff in file_data.get('diffs', []):
-                        file_name = diff.get('source', {}).get('name', 'Unknown')
+                    for diff in file_data.get("diffs", []):
+                        file_name = diff.get("source", {}).get("name", "UNKNOWN")
                         file_type = identify_file_type(file_name, use_pygments)
                         try:
-                            lines_added, lines_removed, lines_modified = process_diff(diff, file_name)
+                            la, lr, lm = process_diff(diff, file_name)
                         except Exception as e:
                             logging.error(f"Error processing diff for file {file_name} from URL {file_changes_url}: {e}")
                             continue
+
                         commit_details.append({
-                            "commit_id": commit_id,
-                            "project_key": project_key,
-                            "repo_slug": repo_slug,
-                            "author_name": author_name,
-                            "author_email": author_email,
-                            "committer_name": "",
-                            "committer_email": "",
-                            "commit_month_year": commit_month_year,
-                            "branch_name": branch_name,
-                            "is_merge_commit": is_merge_commit,
-                            "commit_type": commit_type,
-                            "file_name": file_name,
-                            "file_type": file_type,
-                            "lines_added": lines_added,
-                            "lines_removed": lines_removed,
-                            "lines_modified": lines_modified
+                            "COMMIT_ID": commit_id,
+                            "SPK": spk,
+                            "REPOSITORY_NAME": repository_name,
+                            "AUTHOR_NAME": full_name,
+                            "AUTHOR_EMAIL": email_id,
+                            "COMMITTER_NAME": "",
+                            "COMMITTER_EMAIL": "",
+                            "COMMIT_MONTH_YEAR": commit_month_year,
+                            "BRANCH_NAME": branch_name,
+                            "IS_MERGE_COMMIT": is_merge_commit,
+                            "COMMIT_TYPE": commit_type,
+                            "FILE_NAME": file_name,
+                            "FILE_TYPE": file_type,
+                            "LINES_ADDED": la,
+                            "LINES_REMOVED": lr,
+                            "LINES_MODIFIED": lm
                         })
                 else:
                     error_msg = f"{error_reason}. Full URL: {file_changes_url}"
                     failed_urls.append((file_changes_url, error_msg))
         except Exception as e:
             logging.error(f"Error processing commit at index {index}: {e}")
+
     total_commits = len(df)
     processed_count = 0
     try:
@@ -232,6 +244,7 @@ def get_commits(df: pd.DataFrame, BITBUCKET_BASE_URL: str, use_pygments: bool = 
                 logging.info(f"Processed commit {processed_count} of {total_commits}")
     except Exception as e:
         logging.error(f"Error during concurrent commit processing: {e}")
+
     commit_df = pd.DataFrame(commit_details)
     failed_df = pd.DataFrame(failed_urls, columns=["Failed URL", "Reason"]) if failed_urls else pd.DataFrame()
     return commit_df, failed_df
@@ -241,19 +254,27 @@ def group_commit_data(commit_df: pd.DataFrame) -> pd.DataFrame:
         if commit_df.empty:
             return pd.DataFrame()
         grouped_df = commit_df.groupby([
-            'project_key', 'repo_slug', 'author_name', 'author_email', 'committer_name',
-            'committer_email', 'commit_month_year', 'branch_name', 'is_merge_commit',
-            'file_name', 'file_type'
+            "SPK", "REPOSITORY_NAME", "AUTHOR_NAME", "AUTHOR_EMAIL", "COMMITTER_NAME",
+            "COMMITTER_EMAIL", "COMMIT_MONTH_YEAR", "BRANCH_NAME", "IS_MERGE_COMMIT",
+            "FILE_NAME", "FILE_TYPE"
         ]).agg({
-            'lines_added': 'sum',
-            'lines_removed': 'sum',
-            'lines_modified': 'sum',
-            'commit_id': 'count'
+            "LINES_ADDED": "sum",
+            "LINES_REMOVED": "sum",
+            "LINES_MODIFIED": "sum",
+            "COMMIT_ID": "count"
         }).reset_index()
-        grouped_df.rename(columns={'commit_id': 'group_commits'}, inplace=True)
-        total_df = commit_df.groupby(['author_name', 'commit_month_year', 'file_name'])['commit_id']\
-                            .count().reset_index(name='total_commits')
-        merged_df = pd.merge(grouped_df, total_df, on=['author_name', 'commit_month_year', 'file_name'], how='left')
+
+        grouped_df.rename(columns={"COMMIT_ID": "GROUP_COMMITS"}, inplace=True)
+
+        total_df = commit_df.groupby(["AUTHOR_NAME", "COMMIT_MONTH_YEAR", "FILE_NAME"])["COMMIT_ID"]\
+                            .count().reset_index(name="TOTAL_COMMITS")
+
+        merged_df = pd.merge(
+            grouped_df,
+            total_df,
+            on=["AUTHOR_NAME", "COMMIT_MONTH_YEAR", "FILE_NAME"],
+            how="left"
+        )
         return merged_df
     except Exception as e:
         logging.error(f"Error in group_commit_data: {e}")
@@ -263,51 +284,59 @@ def aggregate_by_commit_id(commit_df: pd.DataFrame) -> pd.DataFrame:
     if commit_df.empty:
         return commit_df
     agg_funcs = {
-        'project_key': 'first',
-        'repo_slug': 'first',
-        'author_name': 'first',
-        'author_email': 'first',
-        'committer_name': 'first',
-        'committer_email': 'first',
-        'commit_month_year': 'first',
-        'branch_name': 'first',
-        'is_merge_commit': 'first',
-        'commit_type': 'first',
-        'file_name': lambda x: '; '.join(x.astype(str).unique()),
-        'file_type': lambda x: '; '.join(x.astype(str).unique()),
-        'lines_added': 'sum',
-        'lines_removed': 'sum',
-        'lines_modified': 'sum'
+        "SPK": "first",
+        "REPOSITORY_NAME": "first",
+        "AUTHOR_NAME": "first",
+        "AUTHOR_EMAIL": "first",
+        "COMMITTER_NAME": "first",
+        "COMMITTER_EMAIL": "first",
+        "COMMIT_MONTH_YEAR": "first",
+        "BRANCH_NAME": "first",
+        "IS_MERGE_COMMIT": "first",
+        "COMMIT_TYPE": "first",
+        "FILE_NAME": lambda x: "; ".join(x.astype(str).unique()),
+        "FILE_TYPE": lambda x: "; ".join(x.astype(str).unique()),
+        "LINES_ADDED": "sum",
+        "LINES_REMOVED": "sum",
+        "LINES_MODIFIED": "sum"
     }
-    aggregated = commit_df.groupby('commit_id').agg(agg_funcs).reset_index()
+    aggregated = commit_df.groupby("COMMIT_ID").agg(agg_funcs).reset_index()
     return aggregated
 
 def main() -> None:
     try:
-        input_file = input_folder / 'CommitInputs.xlsx'
+        input_file = input_folder / "CommitInputs.xlsx"
         df = pd.read_excel(input_file)
+        # Convert all input columns to uppercase
         df.columns = [col.strip().upper() for col in df.columns]
-        use_pygments = os.getenv('USE_PYGMENTS', 'False').lower() == 'true'
+
+        use_pygments = os.getenv("USE_PYGMENTS", "False").lower() == "true"
         logging.info(f"Processing {len(df)} commits from input file.")
+
         commit_df, failed_urls_df = get_commits(df, BITBUCKET_BASE_URL, use_pygments)
+
         if WRITE_SAME_FILE:
-            # In same-file mode, grouping is disabled. Instead, aggregate commit details by commit_id and merge with original input.
             aggregated_df = aggregate_by_commit_id(commit_df)
-            merged_df = pd.merge(df, aggregated_df, on='COMMIT_ID', how='left')
-            with pd.ExcelWriter(input_file, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
+            merged_df = pd.merge(df, aggregated_df, on="COMMIT_ID", how="left")
+            with pd.ExcelWriter(input_file, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
                 merged_df.to_excel(writer, sheet_name="Extended Data", index=False)
+            if not failed_urls_df.empty:
+                with pd.ExcelWriter(input_file, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
+                    failed_urls_df.to_excel(writer, sheet_name="Failed URLs", index=False)
         else:
             grouped_commit_df = group_commit_data(commit_df)
-            output_file = output_folder / 'grouped_commit_df.xlsx'
-            with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+            output_file = output_folder / "grouped_commit_df.xlsx"
+            with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
                 if not grouped_commit_df.empty:
                     grouped_commit_df.to_excel(writer, sheet_name="Grouped Commits", index=False)
                 if not failed_urls_df.empty:
                     failed_urls_df.to_excel(writer, sheet_name="Failed URLs", index=False)
                 if grouped_commit_df.empty and failed_urls_df.empty:
                     pd.DataFrame({"Message": ["No data available"]}).to_excel(writer, sheet_name="Sheet1", index=False)
+
         if not failed_urls_df.empty:
             logging.info(f"Failed URLs captured: {len(failed_urls_df)}")
+
         logging.info("Processing completed")
     except Exception as e:
         logging.error(f"Unexpected error in main: {e}", exc_info=True)
