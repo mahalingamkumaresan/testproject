@@ -23,6 +23,7 @@ from logging.handlers import RotatingFileHandler
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Set the processing folder
 processing_folder = Path("C:/RiskPortal/13MarJavaTrainees")
 input_folder = processing_folder / "input"
 output_folder = processing_folder / "output"
@@ -31,6 +32,11 @@ output_folder.mkdir(parents=True, exist_ok=True)
 BITBUCKET_BASE_URL = os.getenv('BITBUCKET_BASE_URL', 'https://scm.horizon.bankofamerica.com/rest/api/latest')
 BITBUCKET_USERNAME = os.getenv('BITBUCKET_USERNAME', '')
 BITBUCKET_APP_PASSWORD = os.getenv('BITBUCKET_APP_PASSWORD', '')
+
+# Flag to determine output mode.
+# When True, results are written back (merged) into the input Excel file (and grouping is disabled).
+# When False, results are written to a separate output file with separate sheets.
+WRITE_SAME_FILE = True
 
 log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 log_file = output_folder / "BB_data.log"
@@ -253,6 +259,29 @@ def group_commit_data(commit_df: pd.DataFrame) -> pd.DataFrame:
         logging.error(f"Error in group_commit_data: {e}")
         return pd.DataFrame()
 
+def aggregate_by_commit_id(commit_df: pd.DataFrame) -> pd.DataFrame:
+    if commit_df.empty:
+        return commit_df
+    agg_funcs = {
+        'project_key': 'first',
+        'repo_slug': 'first',
+        'author_name': 'first',
+        'author_email': 'first',
+        'committer_name': 'first',
+        'committer_email': 'first',
+        'commit_month_year': 'first',
+        'branch_name': 'first',
+        'is_merge_commit': 'first',
+        'commit_type': 'first',
+        'file_name': lambda x: '; '.join(x.astype(str).unique()),
+        'file_type': lambda x: '; '.join(x.astype(str).unique()),
+        'lines_added': 'sum',
+        'lines_removed': 'sum',
+        'lines_modified': 'sum'
+    }
+    aggregated = commit_df.groupby('commit_id').agg(agg_funcs).reset_index()
+    return aggregated
+
 def main() -> None:
     try:
         input_file = input_folder / 'CommitInputs.xlsx'
@@ -261,15 +290,22 @@ def main() -> None:
         use_pygments = os.getenv('USE_PYGMENTS', 'False').lower() == 'true'
         logging.info(f"Processing {len(df)} commits from input file.")
         commit_df, failed_urls_df = get_commits(df, BITBUCKET_BASE_URL, use_pygments)
-        grouped_commit_df = group_commit_data(commit_df)
-        # Instead of writing to a new file, we append the results to the same input file.
-        with pd.ExcelWriter(input_file, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
-            if not grouped_commit_df.empty:
-                grouped_commit_df.to_excel(writer, sheet_name="Grouped Commits", index=False)
-            if not failed_urls_df.empty:
-                failed_urls_df.to_excel(writer, sheet_name="Failed URLs", index=False)
-            if grouped_commit_df.empty and failed_urls_df.empty:
-                pd.DataFrame({"Message": ["No data available"]}).to_excel(writer, sheet_name="Sheet1", index=False)
+        if WRITE_SAME_FILE:
+            # In same-file mode, grouping is disabled. Instead, aggregate commit details by commit_id and merge with original input.
+            aggregated_df = aggregate_by_commit_id(commit_df)
+            merged_df = pd.merge(df, aggregated_df, on='COMMIT_ID', how='left')
+            with pd.ExcelWriter(input_file, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
+                merged_df.to_excel(writer, sheet_name="Extended Data", index=False)
+        else:
+            grouped_commit_df = group_commit_data(commit_df)
+            output_file = output_folder / 'grouped_commit_df.xlsx'
+            with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+                if not grouped_commit_df.empty:
+                    grouped_commit_df.to_excel(writer, sheet_name="Grouped Commits", index=False)
+                if not failed_urls_df.empty:
+                    failed_urls_df.to_excel(writer, sheet_name="Failed URLs", index=False)
+                if grouped_commit_df.empty and failed_urls_df.empty:
+                    pd.DataFrame({"Message": ["No data available"]}).to_excel(writer, sheet_name="Sheet1", index=False)
         if not failed_urls_df.empty:
             logging.info(f"Failed URLs captured: {len(failed_urls_df)}")
         logging.info("Processing completed")
@@ -281,4 +317,3 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         logging.error(f"Script terminated due to unexpected error: {e}", exc_info=True)
-#
