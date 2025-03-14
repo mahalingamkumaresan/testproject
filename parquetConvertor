@@ -1,0 +1,64 @@
+import os
+import argparse
+import pandas as pd
+
+def convert_to_parquet(file_path, output_folder):
+    filename, ext = os.path.splitext(os.path.basename(file_path))
+    try:
+        if ext.lower() == '.csv':
+            df = pd.read_csv(file_path)
+        elif ext.lower() in ['.xlsx', '.xls']:
+            df = pd.read_excel(file_path, engine='openpyxl')
+        else:
+            print(f"Skipping unsupported file: {file_path}")
+            return
+
+        output_file = os.path.join(output_folder, f"{filename}.parquet")
+        df.to_parquet(output_file, engine='pyarrow', index=False)
+        print(f"Converted {file_path} to {output_file}")
+    except Exception as e:
+        print(f"Error converting {file_path}: {e}")
+
+def convert_to_excel(file_path, output_folder):
+    filename, ext = os.path.splitext(os.path.basename(file_path))
+    if ext.lower() != '.parquet':
+        print(f"Skipping unsupported file for Excel conversion: {file_path}")
+        return
+
+    try:
+        df = pd.read_parquet(file_path, engine='pyarrow')
+        output_file = os.path.join(output_folder, f"{filename}.xlsx")
+        df.to_excel(output_file, index=False, engine='openpyxl')
+        print(f"Converted {file_path} to {output_file}")
+    except Exception as e:
+        print(f"Error converting {file_path}: {e}")
+
+def process_folder(input_folder, output_folder, conversion_type):
+    # Create output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+    
+    for root, _, files in os.walk(input_folder):
+        for file in files:
+            file_path = os.path.join(root, file)
+            if conversion_type == 'to_parquet':
+                if file.lower().endswith(('.csv', '.xlsx', '.xls')):
+                    convert_to_parquet(file_path, output_folder)
+            elif conversion_type == 'to_excel':
+                if file.lower().endswith('.parquet'):
+                    convert_to_excel(file_path, output_folder)
+            else:
+                print(f"Unknown conversion type: {conversion_type}")
+                return
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Convert files in a folder between CSV/XLSX/XLS and Parquet formats."
+    )
+    parser.add_argument("input_folder", help="Path to the input folder")
+    parser.add_argument("output_folder", help="Path to the output folder")
+    parser.add_argument("conversion_type", choices=["to_parquet", "to_excel"],
+                        help="Conversion mode: 'to_parquet' to convert CSV/XLSX/XLS to Parquet, 'to_excel' to convert Parquet to XLSX")
+    
+    args = parser.parse_args()
+    process_folder(args.input_folder, args.output_folder, args.conversion_type)
+# python convert_files.py path/to/input path/to/output to_parquet
