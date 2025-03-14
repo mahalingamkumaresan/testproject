@@ -26,8 +26,12 @@ BITBUCKET_BASE_URL = (
 BITBUCKET_USERNAME = os.getenv("BITBUCKET_USERNAME", "")
 BITBUCKET_APP_PASSWORD = os.getenv("BITBUCKET_APP_PASSWORD", "")
 
-WRITE_SAME_FILE = True
-use_pygments = True
+# Flag to control output mode; here we write to separate files (batch processing)
+WRITE_SAME_FILE = False  # For batch processing to separate files
+use_pygments = True  # Default
+
+# Batch size for processing (adjust as needed)
+BATCH_SIZE = 1000
 
 log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 log_file = output_folder / "BB_data.log"
@@ -41,7 +45,7 @@ logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler]
 
 FILE_TYPE_CACHE: Dict[str, str] = {}
 
-# Token Bucket for rate limiting
+# Token Bucket implementation for rate limiting
 class TokenBucket:
     def __init__(self, capacity: int, tokens_per_second: float):
         self.capacity = capacity
@@ -66,8 +70,9 @@ class TokenBucket:
 
 token_bucket = TokenBucket(capacity=50, tokens_per_second=3)
 
+# Basic authentication
 session = requests.Session()
-session.auth = (BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD)  # Basic Authentication
+session.auth = (BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD)
 session.verify = False
 
 def identify_file_type(file_name: str, use_pygments: bool = False) -> str:
@@ -118,9 +123,7 @@ def process_diff(diff: Dict[str, Any], file_name: str) -> Tuple[int, int, int]:
     try:
         source_info = diff.get("source") or {}
         destination_info = diff.get("destination") or {}
-        # If source is empty, use destination; this covers new files.
         file_name_val = source_info.get("name") or destination_info.get("name") or "UNKNOWN"
-        # Determine if the diff is truncated. If source doesn't have "truncated", check destination.
         truncated = source_info.get("truncated")
         if truncated is None:
             truncated = destination_info.get("truncated", False)
@@ -131,7 +134,6 @@ def process_diff(diff: Dict[str, Any], file_name: str) -> Tuple[int, int, int]:
         lines_modified = 0
         removed_lines: Dict[Any, str] = {}
         added_lines: Dict[Any, str] = {}
-        # We expect file_name to equal file_name_val; if not, return zeros.
         if file_name not in {file_name_val}:
             return 0, 0, 0
         for hunk in diff.get("hunks", []):
@@ -336,38 +338,40 @@ def main() -> None:
         df = pd.read_excel(input_file)
         df.columns = [col.strip().upper() for col in df.columns]
         logging.info(f"Processing {len(df)} commits from input file.")
-        commit_df, failed_urls_df = get_commits(df, BITBUCKET_BASE_URL, use_pygments)
-        if "FULL_NAME" in df.columns and "COMMIT_DATE" in df.columns:
-            df["TOTAL_COMMITS"] = df.groupby(
-                ["FULL_NAME", df["COMMIT_DATE"].dt.strftime("%m-%Y")]
-            )["COMMIT_ID"].transform("count")
-        lang_map_df = generate_language_mapping(commit_df)
-        if WRITE_SAME_FILE:
-            aggregated_df = aggregate_by_commit_id(commit_df)
-            if "COMMIT_ID" in df.columns and "COMMIT_ID" in aggregated_df.columns:
-                merged_df = pd.merge(df, aggregated_df, on="COMMIT_ID", how="left")
-                with pd.ExcelWriter(input_file, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
-                    merged_df.to_excel(writer, sheet_name="Extended Data", index=False)
-                    lang_map_df.to_excel(writer, sheet_name="Language Mapping", index=False)
-            else:
-                logging.info("COMMIT_ID column missing; skipping merge.")
-            if not failed_urls_df.empty:
-                with pd.ExcelWriter(input_file, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
-                    failed_urls_df.to_excel(writer, sheet_name="Failed URLs", index=False)
+
+        # Process in batches to avoid high memory usage
+        total = len(df)
+        batch_outputs = []
+        batch_failed = []
+        for start in range(0, total, BATCH_SIZE):
+            batch_df = df.iloc[start: start+BATCH_SIZE]
+            logging.info(f"Processing batch {start//BATCH_SIZE + 1} with {len(batch_df)} commits")
+            commit_batch, failed_batch = get_commits(batch_df, BITBUCKET_BASE_URL, use_pygments)
+            # Write each batch's commit details to a separate Parquet file
+            batch_output_file = output_folder / f"extended_data_batch_{start//BATCH_SIZE + 1}.parquet"
+            commit_batch.to_parquet(batch_output_file, engine="pyarrow", index=False)
+            if not failed_batch.empty:
+                batch_failed_file = output_folder / f"failed_urls_batch_{start//BATCH_SIZE + 1}.parquet"
+                failed_batch.to_parquet(batch_failed_file, engine="pyarrow", index=False)
+            batch_outputs.append(commit_batch)
+            batch_failed.append(failed_batch)
+        # Optionally, combine all batch commit outputs for language mapping
+        if batch_outputs:
+            combined_commits = pd.concat(batch_outputs, ignore_index=True)
         else:
-            grouped_commit_df = group_commit_data(commit_df)
-            output_file = output_folder / "grouped_commit_df.xlsx"
-            with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
-                if not grouped_commit_df.empty:
-                    grouped_commit_df.to_excel(writer, sheet_name="Grouped Commits", index=False)
-                if not failed_urls_df.empty:
-                    failed_urls_df.to_excel(writer, sheet_name="Failed URLs", index=False)
-                lang_map_df.to_excel(writer, sheet_name="Language Mapping", index=False)
-                if grouped_commit_df.empty and failed_urls_df.empty:
-                    pd.DataFrame({"Message": ["No data available"]}).to_excel(writer, sheet_name="Sheet1", index=False)
-        if not failed_urls_df.empty:
-            logging.info(f"Failed URLs captured: {len(failed_urls_df)}")
-        logging.info("Processing completed")
+            combined_commits = pd.DataFrame()
+        lang_map_df = generate_language_mapping(combined_commits)
+        lang_map_file = output_folder / "language_mapping.parquet"
+        lang_map_df.to_parquet(lang_map_file, engine="pyarrow", index=False)
+
+        # Optionally, combine failed batches and write one file
+        if batch_failed:
+            combined_failed = pd.concat(batch_failed, ignore_index=True)
+            if not combined_failed.empty:
+                failed_file = output_folder / "failed_urls.parquet"
+                combined_failed.to_parquet(failed_file, engine="pyarrow", index=False)
+
+        logging.info("Batch processing completed")
     except Exception as e:
         logging.error(f"Unexpected error in main: {e}", exc_info=True)
 
@@ -376,4 +380,3 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         logging.error(f"Script terminated due to unexpected error: {e}", exc_info=True)
-#!
