@@ -1,0 +1,42 @@
+import os
+import cx_Oracle
+from contextlib import contextmanager
+
+# Fetch credentials from environment variables
+USERNAME = os.getenv('ORACLE_USER')
+PASSWORD = os.getenv('ORACLE_PASS')
+
+if not USERNAME or not PASSWORD:
+    raise EnvironmentError("Please set ORACLE_USER and ORACLE_PASS environment variables.")
+
+# Function to read connection strings from file
+def read_connection_strings(filename):
+    with open(filename, 'r') as file:
+        return [line.strip() for line in file if line.strip()]
+
+# Context manager for Oracle connections
+@contextmanager
+def oracle_connection(conn_string):
+    connection = None
+    try:
+        connection = cx_Oracle.connect(USERNAME, PASSWORD, conn_string)
+        print(f"Connected successfully to: {conn_string}")
+        yield connection
+    except cx_Oracle.Error as e:
+        print(f"Failed to connect to: {conn_string}\nError: {e}")
+    finally:
+        if connection:
+            connection.close()
+            print(f"Disconnected from: {conn_string}")
+
+# Main execution
+def main():
+    conn_strings = read_connection_strings('connections.txt')
+    print(f"Attempting to connect to {len(conn_strings)} databases...")
+
+    for conn_string in conn_strings:
+        with oracle_connection(conn_string):
+            pass  # connection tested, no further actions needed
+
+if __name__ == "__main__":
+    main()
