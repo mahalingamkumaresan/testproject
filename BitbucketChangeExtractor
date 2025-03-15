@@ -1,4 +1,4 @@
-  import re
+import re
 import threading
 import logging
 import json
@@ -23,14 +23,12 @@ class JsonFormatter(logging.Formatter):
             "module": record.name,
             "message": record.getMessage()
         }
-        # Include extra fields if they exist
         if hasattr(record, "error_category"):
             log_record["error_category"] = record.error_category
         if hasattr(record, "severity"):
             log_record["severity"] = record.severity
         return json.dumps(log_record)
 
-# Set up the root logger with the JSON formatter
 root_handler = logging.StreamHandler()
 root_handler.setFormatter(JsonFormatter())
 logging.basicConfig(level=logging.DEBUG, handlers=[root_handler])
@@ -72,7 +70,7 @@ class BitbucketAPI:
         self.token_bucket = token_bucket
         self.session = requests.Session()
         self.session.auth = (self.username, self.app_password)
-        self.session.verify = False  # Ensure you trust the endpoint if disabling SSL verification
+        self.session.verify = False
         self.logger = logging.getLogger("BitbucketAPI")
 
     def make_request(self, url: str, retries: int = 2, delay: int = 2):
@@ -86,7 +84,6 @@ class BitbucketAPI:
                 return response, None
             except requests.exceptions.RequestException as e:
                 error_message = str(e)
-                # Add structured logging fields
                 extra = {"error_category": "API Failure", "severity": "error"}
                 self.logger.error(f"Request failed for {url}: {error_message}", extra=extra)
                 if response is not None and response.status_code in [404, 401]:
@@ -120,7 +117,6 @@ def parse_diff_change(change: dict) -> (int, int, int):
                 elif segment.get('type') == 'ADDED':
                     for _ in segment.get('lines', []):
                         lines_added += 1
-        # Modification detection logic could be added later
     except Exception as e:
         logger_diff.error(f"Error parsing diff change: {e}")
         raise e
@@ -130,7 +126,6 @@ def parse_diff_change(change: dict) -> (int, int, int):
 # Stub for Future Complexity and Commit Details Logic
 # ------------------------------
 def calculate_complexity_and_details(change: dict) -> (int, dict):
-    # Isolated for future use
     return 0, {}
 
 # ------------------------------
@@ -140,14 +135,13 @@ class CommitProcessor:
     def __init__(self, api: BitbucketAPI, output_folder: str, author_email_filter: set = None):
         self.api = api
         self.output_folder = output_folder
-        self.author_email_filter = author_email_filter  # Only used in SPK mode
+        self.author_email_filter = author_email_filter
         self.logger = logging.getLogger("CommitProcessor")
         self.jira_pattern = r"\b[A-Z]+-\d+\b"
-        self.failed_urls = []    # List of dicts for failed API calls
-        self.diff_failures = []  # List of dicts for diff parsing failures
+        self.failed_urls = []
+        self.diff_failures = []
 
     def process_commits_spk(self, project_key: str, repo_slug: str, start_date: str, end_date: str):
-        """Process commits for SPK mode (with filtering) and return output rows for this repo."""
         output_rows = []
         url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits?limit=1000"
         start_month = datetime.strptime(start_date, '%Y-%m-%d').strftime('%Y-%m')
@@ -254,16 +248,12 @@ class CommitProcessor:
         return output_rows
 
     def process_commits_by_ids(self, commit_id_file: str):
-        """Process commits in commit mode from an input file with columns: Commit Id, Project Key, Repo Slug."""
-        # Read the commit ids file
         df = pd.read_excel(commit_id_file)
-        # Expecting columns: "Commit Id", "Project Key", "Repo Slug"
         output_rows = []
         for index, row in df.iterrows():
             commit_id = row["Commit Id"]
             project_key = row["Project Key"]
             repo_slug = row["Repo Slug"]
-            # In commit mode, no author filtering or date range is applied.
             self.logger.debug(f"Processing commit {commit_id} in {project_key}/{repo_slug}")
             diff_url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits/{commit_id}/diff?ignore_whitespace=true"
             file_response, diff_error = self.api.make_request(diff_url)
@@ -282,7 +272,6 @@ class CommitProcessor:
                 })
                 continue
 
-            # Use commit's timestamp if available; otherwise, mark as Unknown month
             commit_month = "Unknown"
             if "authorTimestamp" in row:
                 try:
@@ -300,7 +289,6 @@ class CommitProcessor:
                 })
                 continue
 
-            # In commit mode, we don't have author filtering, so we'll set dummy values if needed.
             author_name = row.get("Author Name", "Unknown")
             author_email = row.get("Author Email", "Unknown")
             for change in diff_data.get("diffs", []):
@@ -357,13 +345,11 @@ class CommitProcessor:
             self.logger.info(f"Chunk {chunk_index} has no rows; nothing to write.")
 
     def write_failure_files(self):
-        # Write failed URLs
         if self.failed_urls:
             df_failed = pd.DataFrame(self.failed_urls)
             failed_path = os.path.join(self.output_folder, "failed_urls.parquet")
             df_failed.to_parquet(failed_path, engine="pyarrow", index=False)
             self.logger.info(f"Failed URLs written to {failed_path}")
-        # Write diff failures
         if self.diff_failures:
             df_diff_fail = pd.DataFrame(self.diff_failures)
             diff_fail_path = os.path.join(self.output_folder, "diff_failures.parquet")
@@ -378,9 +364,8 @@ def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end
     filter_file = os.path.join(input_folder, 'author_filter.xlsx')
     wb = load_workbook(project_keys_file)
     sheet = wb.active
-    chunk_index = 1  # For chunked output
+    chunk_index = 1
 
-    # Load author filter (expects a column "Author Email")
     filter_df = pd.read_excel(filter_file)
     author_email_filter = set(filter_df['Author Email'].str.lower())
 
@@ -416,12 +401,10 @@ def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end
                     project_key, repo_slug, start_date, end_date
                 )
                 futures[future] = (project_key, repo_slug)
-        # Write chunk per repository as results come in
         for future in as_completed(futures):
             proj_key, repo_slug = futures[future]
             try:
                 rows = future.result()
-                # Write out the rows for this repository as a separate chunk
                 processor.write_chunk(rows, chunk_index)
                 chunk_index += 1
                 main_logger.info(f"Finished processing repo {repo_slug} in project {proj_key}")
@@ -435,7 +418,6 @@ def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end
     processor.write_failure_files()
 
 def process_commit_mode(input_folder: str, output_folder: str):
-    # Input file containing commit IDs with columns: "Commit Id", "Project Key", "Repo Slug" (optionally Author details)
     commit_id_file = os.path.join(input_folder, 'commit_ids.xlsx')
     BITBUCKET_BASE_URL = os.getenv('BITBUCKET_BASE_URL', 'https://scm.horizon.bankofamerica.com/rest/api/latest')
     BITBUCKET_USERNAME = os.getenv('BITBUCKET_USERNAME', '')
@@ -443,9 +425,7 @@ def process_commit_mode(input_folder: str, output_folder: str):
     token_bucket = TokenBucket(capacity=50, tokens_per_second=4)
     api = BitbucketAPI(BITBUCKET_BASE_URL, BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD, token_bucket)
     processor = CommitProcessor(api, output_folder)
-    # For commit mode, process in one batch or use chunking if necessary.
     rows = processor.process_commits_by_ids(commit_id_file)
-    # Write output as one chunk (or split into chunks if rows are huge)
     processor.write_chunk(rows, 1)
     processor.write_failure_files()
 
@@ -456,22 +436,23 @@ def main():
     parser = argparse.ArgumentParser(description="Process Bitbucket commits.")
     parser.add_argument('--mode', choices=['spk', 'commit'], default='spk',
                         help="Input mode: 'spk' for SPK list mode, 'commit' for commit id mode.")
-    parser.add_argument('--input_folder', default="C:/Riskportal/3Mar2025_JavaTrainings/input",
-                        help="Folder containing input files.")
-    parser.add_argument('--output_folder', default="C:/Riskportal/3Mar2025_JavaTrainings/output",
-                        help="Folder to write output files.")
     parser.add_argument('--start_date', default='2024-01-01',
                         help="Start date (YYYY-MM-DD) for commit filtering (only used in SPK mode).")
     parser.add_argument('--end_date', default='2025-03-31',
                         help="End date (YYYY-MM-DD) for commit filtering (only used in SPK mode).")
     args = parser.parse_args()
 
+    # Use a single common folder for both input and output
+    common_folder = "C:/Riskportal/3Mar2025_JavaTrainings"
+    input_folder = os.path.join(common_folder, "input")
+    output_folder = os.path.join(common_folder, "output")
+
     if args.mode == 'spk':
         main_logger.info("Running in SPK mode.")
-        process_spk_mode(args.input_folder, args.output_folder, args.start_date, args.end_date)
+        process_spk_mode(input_folder, output_folder, args.start_date, args.end_date)
     elif args.mode == 'commit':
         main_logger.info("Running in Commit Id mode.")
-        process_commit_mode(args.input_folder, args.output_folder)
+        process_commit_mode(input_folder, output_folder)
 
 if __name__ == "__main__":
     main()
