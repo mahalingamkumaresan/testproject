@@ -144,9 +144,10 @@ class CommitProcessor:
         self.failed_urls = []
         self.diff_failures = []
 
-    def get_top_branches(self, project_key: str, repo_slug: str):
+    def get_top_branches(self, project_key: str, repo_slug: str, start_date: str, end_date: str):
         """
         Fetch branches for a repo, then return the top N branches sorted by latest commit timestamp.
+        Only include branches whose latest commit falls within the date range.
         """
         branch_url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/branches?limit=1000"
         response, err = self.api.make_request(branch_url)
@@ -158,6 +159,9 @@ class CommitProcessor:
             return []
         branches_data = response.json().get("values", [])
         branches_with_timestamp = []
+        # Convert date range strings to datetime objects
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
         for branch in branches_data:
             branch_name = branch.get("displayId")
             latest_commit = branch.get("latestCommit")
@@ -175,14 +179,17 @@ class CommitProcessor:
             commit_details = commit_resp.json()
             timestamp = commit_details.get("authorTimestamp")
             if timestamp:
-                branches_with_timestamp.append({
-                    "branch": branch_name,
-                    "timestamp": timestamp
-                })
+                commit_time = datetime.fromtimestamp(timestamp / 1000)
+                # Only consider the branch if its latest commit falls within the range
+                if start_dt <= commit_time <= end_dt:
+                    branches_with_timestamp.append({
+                        "branch": branch_name,
+                        "timestamp": timestamp
+                    })
         # Sort branches descending by timestamp (most recent first)
         branches_sorted = sorted(branches_with_timestamp, key=lambda x: x["timestamp"], reverse=True)
         top_branches = [b["branch"] for b in branches_sorted[:self.recent_branches]]
-        self.logger.debug(f"Top {self.recent_branches} branches for {project_key}/{repo_slug}: {top_branches}")
+        self.logger.debug(f"Top {self.recent_branches} branches for {project_key}/{repo_slug} within date range: {top_branches}")
         return top_branches
 
     def process_commits_spk(self, project_key: str, repo_slug: str, start_date: str, end_date: str):
@@ -190,7 +197,8 @@ class CommitProcessor:
         Process commits for SPK mode using top recent branches and deduplicate commits.
         """
         deduped_commits = {}
-        top_branches = self.get_top_branches(project_key, repo_slug)
+        # Get top branches that have latest commits within the date range
+        top_branches = self.get_top_branches(project_key, repo_slug, start_date, end_date)
         # For each branch, fetch commits and merge into deduped_commits dictionary
         for branch in top_branches:
             url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits?limit=1000&until={branch}"
@@ -230,7 +238,6 @@ class CommitProcessor:
             author_email = commit["author"].get('emailaddress', '').lower()
             commit_id = commit.get('id', '')
             commit_message = commit.get('message', '')
-            # JIRA IDs extraction (for future use)
             jira_ids = re.findall(self.jira_pattern, commit_message)
             self.logger.debug(f"Processing commit {commit_id} in {project_key}/{repo_slug}")
             diff_url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits/{commit_id}/diff?ignore_whitespace=true"
@@ -472,7 +479,6 @@ def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end
                     "error_category": "Processing Failure", "severity": "error"
                 })
     processor.write_failure_files()
-    # After processing, print the total tokens consumed
     main_logger.info(f"Total tokens consumed: {token_bucket.calls_made}")
 
 def process_commit_mode(input_folder: str, output_folder: str):
