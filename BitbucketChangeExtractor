@@ -10,6 +10,7 @@ import argparse
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openpyxl import load_workbook
+from requests.adapters import HTTPAdapter
 
 # ------------------------------
 # Custom JSON Logging Formatter
@@ -27,16 +28,6 @@ class JsonFormatter(logging.Formatter):
         if hasattr(record, "severity"):
             log_record["severity"] = record.severity
         return json.dumps(log_record)
-
-# Setup logging: both console and file handlers.
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(JsonFormatter())
-
-file_handler = logging.FileHandler("process_log.txt")
-file_handler.setFormatter(JsonFormatter())
-
-logging.basicConfig(level=logging.DEBUG, handlers=[console_handler, file_handler])
-main_logger = logging.getLogger("Main")
 
 # ------------------------------
 # Checkpoint Utilities
@@ -79,7 +70,7 @@ class TokenBucket:
             time.sleep(0.1)
 
 # ------------------------------
-# Bitbucket API Wrapper with Session Reuse
+# Bitbucket API Wrapper with Session Reuse and Increased Connection Pool
 # ------------------------------
 class BitbucketAPI:
     def __init__(self, base_url: str, username: str, app_password: str, token_bucket: TokenBucket):
@@ -90,6 +81,10 @@ class BitbucketAPI:
         self.session = requests.Session()
         self.session.auth = (self.username, self.app_password)
         self.session.verify = False
+        # Increase connection pool size to 50
+        adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
         self.logger = logging.getLogger("BitbucketAPI")
 
     def make_request(self, url: str, retries: int = 2, delay: int = 2):
@@ -103,8 +98,10 @@ class BitbucketAPI:
                 return response, None
             except requests.exceptions.RequestException as e:
                 error_message = str(e)
+                # Include status code if available
+                status_code = response.status_code if response is not None else "N/A"
                 extra = {"error_category": "API Failure", "severity": "error"}
-                self.logger.error(f"Request failed for {url}: {error_message}", extra=extra)
+                self.logger.error(f"Request failed for {url}: {error_message} (Status: {status_code})", extra=extra)
                 if response is not None and response.status_code in [404, 401]:
                     try:
                         error_message = response.json().get('errors', [{}])[0].get('message', error_message)
@@ -125,7 +122,7 @@ class BitbucketAPI:
 def parse_diff_change(change: dict) -> (int, int, int):
     lines_added = 0
     lines_removed = 0
-    lines_modified = 0  # Some APIs don't provide a separate modified count.
+    lines_modified = 0  # Some APIs don’t provide a separate modified count.
     try:
         for hunk in change.get('hunks', []):
             for segment in hunk.get('segments', []):
@@ -151,7 +148,7 @@ def calculate_complexity_and_details(change: dict) -> (int, dict):
 # ------------------------------
 class CommitProcessor:
     def __init__(self, api: BitbucketAPI, output_folder: str, author_email_filter: set = None, recent_branches: int = 1):
-        # Note: recent_branches is now fixed to 1 (top 1 branch)
+        # recent_branches fixed to 1 per requirement.
         self.api = api
         self.output_folder = output_folder
         self.author_email_filter = author_email_filter
@@ -166,8 +163,10 @@ class CommitProcessor:
         response, err = self.api.make_request(branch_url)
         if not response:
             self.failed_urls.append({
-                "url": branch_url, "reason": err,
-                "error_category": "API Failure", "severity": "error"
+                "url": branch_url,
+                "reason": err,
+                "error_category": "API Failure",
+                "severity": "error"
             })
             return None
         branches_data = response.json().get("values", [])
@@ -183,8 +182,10 @@ class CommitProcessor:
             commit_resp, commit_err = self.api.make_request(commit_url)
             if not commit_resp:
                 self.failed_urls.append({
-                    "url": commit_url, "reason": commit_err,
-                    "error_category": "API Failure", "severity": "error"
+                    "url": commit_url,
+                    "reason": commit_err,
+                    "error_category": "API Failure",
+                    "severity": "error"
                 })
                 continue
             commit_details = commit_resp.json()
@@ -199,13 +200,11 @@ class CommitProcessor:
         if not branches_with_timestamp:
             self.logger.debug(f"No branches found for {project_key}/{repo_slug} within date range")
             return None
-        # Sort descending by timestamp and pick the top one.
         top_branch = sorted(branches_with_timestamp, key=lambda x: x["timestamp"], reverse=True)[0]["branch"]
         self.logger.debug(f"Top branch for {project_key}/{repo_slug} within date range: {top_branch}")
         return top_branch
 
     def process_commits_spk(self, project_key: str, repo_slug: str, start_date: str, end_date: str):
-        # Disable pagination: we only fetch the first page.
         deduped_commits = {}
         top_branch = self.get_top_branch(project_key, repo_slug, start_date, end_date)
         if not top_branch:
@@ -214,8 +213,10 @@ class CommitProcessor:
         response, error_reason = self.api.make_request(url)
         if not response:
             self.failed_urls.append({
-                "url": url, "reason": error_reason,
-                "error_category": "API Failure", "severity": "error"
+                "url": url,
+                "reason": error_reason,
+                "error_category": "API Failure",
+                "severity": "error"
             })
             return []
         data = response.json()
@@ -247,24 +248,31 @@ class CommitProcessor:
             file_response, diff_error = self.api.make_request(diff_url)
             if not file_response:
                 self.failed_urls.append({
-                    "url": diff_url, "reason": diff_error,
-                    "error_category": "API Failure", "severity": "error"
+                    "url": diff_url,
+                    "reason": diff_error,
+                    "error_category": "API Failure",
+                    "severity": "error"
                 })
                 continue
             try:
                 diff_data = file_response.json()
             except Exception as e:
                 self.diff_failures.append({
-                    "url": diff_url, "commit_id": commit_id, "reason": str(e),
-                    "error_category": "Diff Parsing Failure", "severity": "error"
+                    "url": diff_url,
+                    "commit_id": commit_id,
+                    "reason": str(e),
+                    "error_category": "Diff Parsing Failure",
+                    "severity": "error"
                 })
                 continue
             first_row = True
             if 'diffs' not in diff_data or not diff_data['diffs']:
                 self.diff_failures.append({
-                    "url": diff_url, "commit_id": commit_id,
+                    "url": diff_url,
+                    "commit_id": commit_id,
                     "reason": "No diff data found",
-                    "error_category": "Diff Parsing Failure", "severity": "warning"
+                    "error_category": "Diff Parsing Failure",
+                    "severity": "warning"
                 })
                 continue
             for change in diff_data.get("diffs", []):
@@ -281,15 +289,19 @@ class CommitProcessor:
                     added, removed, modified = parse_diff_change(change)
                     if added == 0 and removed == 0 and modified == 0 and file_status == "modified":
                         self.diff_failures.append({
-                            "url": diff_url, "commit_id": commit_id,
+                            "url": diff_url,
+                            "commit_id": commit_id,
                             "reason": "No changes found in diff",
-                            "error_category": "Diff Parsing Failure", "severity": "warning"
+                            "error_category": "Diff Parsing Failure",
+                            "severity": "warning"
                         })
                 except Exception as e:
                     self.diff_failures.append({
-                        "url": diff_url, "commit_id": commit_id,
+                        "url": diff_url,
+                        "commit_id": commit_id,
                         "reason": f"Exception during diff parsing: {e}",
-                        "error_category": "Diff Parsing Failure", "severity": "error"
+                        "error_category": "Diff Parsing Failure",
+                        "severity": "error"
                     })
                     continue
                 row = {
@@ -311,7 +323,7 @@ class CommitProcessor:
         return output_rows
 
     def process_commits_by_ids(self, commit_id_file: str):
-        # (Commit mode remains unchanged.)
+        # For commit mode (unchanged)
         df = pd.read_excel(commit_id_file)
         checkpoint_file = os.path.join(self.output_folder, "commit_checkpoint.txt")
         processed_commits = load_checkpoint(checkpoint_file)
@@ -326,16 +338,21 @@ class CommitProcessor:
             file_response, diff_error = self.api.make_request(diff_url)
             if not file_response:
                 self.failed_urls.append({
-                    "url": diff_url, "reason": diff_error,
-                    "error_category": "API Failure", "severity": "error"
+                    "url": diff_url,
+                    "reason": diff_error,
+                    "error_category": "API Failure",
+                    "severity": "error"
                 })
                 continue
             try:
                 diff_data = file_response.json()
             except Exception as e:
                 self.diff_failures.append({
-                    "url": diff_url, "commit_id": commit_id, "reason": str(e),
-                    "error_category": "Diff Parsing Failure", "severity": "error"
+                    "url": diff_url,
+                    "commit_id": commit_id,
+                    "reason": str(e),
+                    "error_category": "Diff Parsing Failure",
+                    "severity": "error"
                 })
                 continue
             commit_month = "Unknown"
@@ -348,9 +365,11 @@ class CommitProcessor:
             first_row = True
             if 'diffs' not in diff_data or not diff_data['diffs']:
                 self.diff_failures.append({
-                    "url": diff_url, "commit_id": commit_id,
+                    "url": diff_url,
+                    "commit_id": commit_id,
                     "reason": "No diff data found",
-                    "error_category": "Diff Parsing Failure", "severity": "warning"
+                    "error_category": "Diff Parsing Failure",
+                    "severity": "warning"
                 })
                 continue
             author_name = row.get("Author Name", "Unknown")
@@ -369,15 +388,19 @@ class CommitProcessor:
                     added, removed, modified = parse_diff_change(change)
                     if added == 0 and removed == 0 and modified == 0 and file_status == "modified":
                         self.diff_failures.append({
-                            "url": diff_url, "commit_id": commit_id,
+                            "url": diff_url,
+                            "commit_id": commit_id,
                             "reason": "No changes found in diff",
-                            "error_category": "Diff Parsing Failure", "severity": "warning"
+                            "error_category": "Diff Parsing Failure",
+                            "severity": "warning"
                         })
                 except Exception as e:
                     self.diff_failures.append({
-                        "url": diff_url, "commit_id": commit_id,
+                        "url": diff_url,
+                        "commit_id": commit_id,
                         "reason": f"Exception during diff parsing: {e}",
-                        "error_category": "Diff Parsing Failure", "severity": "error"
+                        "error_category": "Diff Parsing Failure",
+                        "severity": "error"
                     })
                     continue
                 out_row = {
@@ -448,11 +471,12 @@ def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end
     BITBUCKET_APP_PASSWORD = os.getenv('BITBUCKET_APP_PASSWORD', '')
     token_bucket = TokenBucket(capacity=70, tokens_per_second=1)
     api = BitbucketAPI(BITBUCKET_BASE_URL, BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD, token_bucket)
-    # Set recent_branches to 1 per requirements.
     processor = CommitProcessor(api, output_folder, author_email_filter, recent_branches=1)
 
+    successful_repos = 0
+    total_repos = 0
+    futures = {}
     with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {}
         for row in spk_rows:
             project_key = row[0]
             if not project_key or project_key in processed_spks:
@@ -460,27 +484,35 @@ def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end
             futures[project_key] = executor.submit(process_project, project_key, processor, start_date, end_date)
         for future in as_completed(futures):
             spk_progress += 1
-            proj_key, repo_outputs = future.result()  # repo_outputs: list of (repo_slug, output_rows)
+            proj_key, repo_outputs = future.result()  # repo_outputs is list of (repo_slug, output_rows)
             for repo_slug, rows in repo_outputs:
-                filename = f"output_{proj_key}_{repo_slug}"
-                processor.write_chunk(rows, 1, filename_prefix=filename)
-                main_logger.info(f"Output file for project {proj_key} repo {repo_slug}: {filename}.parquet")
+                total_repos += 1
+                if rows:
+                    filename = f"output_{proj_key}_{repo_slug}"
+                    processor.write_chunk(rows, 1, filename_prefix=filename)
+                    main_logger.info(f"Output file for project {proj_key} repo {repo_slug}: {filename}.parquet")
+                    successful_repos += 1
+                else:
+                    main_logger.info(f"No commits found for project {proj_key} repo {repo_slug}.")
             update_checkpoint(spk_checkpoint_file, proj_key)
             main_logger.info(f"Finished processing project {proj_key} ({spk_progress}/{total_spks})")
     processor.write_failure_files()
+    main_logger.info(f"Successfully processed {successful_repos} out of {total_repos} repos.")
     main_logger.info(f"Total tokens consumed: {token_bucket.calls_made}")
     main_logger.info(f"Remaining token capacity: {token_bucket.tokens}")
 
 def process_project(project_key: str, processor: CommitProcessor, start_date: str, end_date: str):
     BITBUCKET_BASE_URL = os.getenv('BITBUCKET_BASE_URL', 'https://scm.horizon.bankofamerica.com/rest/api/latest')
     api = processor.api
-    repo_outputs = []  # Each element: (repo_slug, output_rows)
+    repo_outputs = []  # List of tuples: (repo_slug, output_rows)
     repos_url = f"{BITBUCKET_BASE_URL}/projects/{project_key}/repos?limit=1000"
     response, error_reason = api.make_request(repos_url)
     if not response:
         processor.failed_urls.append({
-            "url": repos_url, "reason": error_reason,
-            "error_category": "API Failure", "severity": "error"
+            "url": repos_url,
+            "reason": error_reason,
+            "error_category": "API Failure",
+            "severity": "error"
         })
         return (project_key, repo_outputs)
     repos_data = response.json()
@@ -504,24 +536,37 @@ def main():
     parser.add_argument('--end_date', default='2025-03-31',
                         help="End date (YYYY-MM-DD) for commit filtering (only used in SPK mode).")
     parser.add_argument('--recent_branches', type=int, default=1,
-                        help="Number of recent branches to process (only used in SPK mode; now fixed to 1).")
+                        help="Number of recent branches to process (only used in SPK mode; fixed to 1).")
     parser.add_argument('--order', choices=['top-down', 'bottom-up'], default='top-down',
                         help="Processing order for SPKs (top-down or bottom-up).")
     parser.add_argument('--commit_chunk_size', type=int, default=1000,
                         help="Chunk size for processing commit mode (if used).")
     args = parser.parse_args()
 
+    # Use a single common folder for both input and output
     common_folder = "C:/Riskportal/3Mar2025_JavaTrainings"
     input_folder = os.path.join(common_folder, "input")
     output_folder = os.path.join(common_folder, "output")
+    
+    # Reconfigure logging file handler to write into output folder:
+    for handler in logging.getLogger().handlers[:]:
+        logging.getLogger().removeHandler(handler)
+    output_log_path = os.path.join(output_folder, "process_log.txt")
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(JsonFormatter())
+    file_handler = logging.FileHandler(output_log_path)
+    file_handler.setFormatter(JsonFormatter())
+    logging.basicConfig(level=logging.DEBUG, handlers=[console_handler, file_handler])
+    global main_logger
+    main_logger = logging.getLogger("Main")
 
     if args.mode == 'spk':
-        main_logger.info("Running in SPK mode (API-only, no pagination, top 1 branch per repo).")
+        main_logger.info("Running in SPK mode (API-only).")
         process_spk_mode(input_folder, output_folder, args.start_date, args.end_date, args.recent_branches, args.order)
     elif args.mode == 'commit':
-        # Commit mode remains unchanged
         main_logger.info("Running in Commit Id mode.")
         process_commit_mode(input_folder, output_folder, args.commit_chunk_size)
 
 if __name__ == "__main__":
     main()
+###
