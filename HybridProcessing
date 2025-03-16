@@ -1,0 +1,654 @@
+import re
+import threading
+import logging
+import json
+import time
+import os
+import pandas as pd
+import requests
+import argparse
+import subprocess
+import tempfile
+import shutil
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from openpyxl import load_workbook
+
+# ------------------------------
+# Custom JSON Logging Formatter
+# ------------------------------
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        log_record = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "module": record.name,
+            "message": record.getMessage()
+        }
+        if hasattr(record, "error_category"):
+            log_record["error_category"] = record.error_category
+        if hasattr(record, "severity"):
+            log_record["severity"] = record.severity
+        return json.dumps(log_record)
+
+# Set up console and file logging
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(JsonFormatter())
+file_handler = logging.FileHandler("process_log.txt")
+file_handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.DEBUG, handlers=[console_handler, file_handler])
+main_logger = logging.getLogger("Main")
+
+# ------------------------------
+# Checkpoint Utilities
+# ------------------------------
+def load_checkpoint(file_path):
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            return set(line.strip() for line in f if line.strip())
+    return set()
+
+def update_checkpoint(file_path, identifier):
+    with open(file_path, 'a') as f:
+        f.write(f"{identifier}\n")
+
+# ------------------------------
+# Token Bucket for Rate Limiting with Consumption Tracking
+# ------------------------------
+class TokenBucket:
+    def __init__(self, capacity: int, tokens_per_second: float):
+        self.capacity = capacity
+        self.tokens_per_second = tokens_per_second
+        self.tokens = capacity
+        self.last_refill = time.time()
+        self.lock = threading.Lock()
+        self.calls_made = 0
+
+    def consume(self, tokens: int = 1):
+        while True:
+            with self.lock:
+                now = time.time()
+                elapsed = now - self.last_refill
+                refill = elapsed * self.tokens_per_second
+                if refill > 0:
+                    self.tokens = min(self.capacity, self.tokens + refill)
+                    self.last_refill = now
+                if self.tokens >= tokens:
+                    self.tokens -= tokens
+                    self.calls_made += tokens
+                    return
+            time.sleep(0.1)
+
+# ------------------------------
+# Bitbucket API Wrapper with Session Reuse
+# ------------------------------
+class BitbucketAPI:
+    def __init__(self, base_url: str, username: str, app_password: str, token_bucket: TokenBucket):
+        self.base_url = base_url
+        self.username = username
+        self.app_password = app_password
+        self.token_bucket = token_bucket
+        self.session = requests.Session()
+        self.session.auth = (self.username, self.app_password)
+        self.session.verify = False
+        self.logger = logging.getLogger("BitbucketAPI")
+
+    def make_request(self, url: str, retries: int = 2, delay: int = 2):
+        response = None
+        for attempt in range(retries):
+            self.token_bucket.consume(1)
+            try:
+                self.logger.debug(f"Requesting URL: {url} (Attempt {attempt+1}/{retries})")
+                response = self.session.get(url)
+                response.raise_for_status()
+                return response, None
+            except requests.exceptions.RequestException as e:
+                error_message = str(e)
+                extra = {"error_category": "API Failure", "severity": "error"}
+                self.logger.error(f"Request failed for {url}: {error_message}", extra=extra)
+                if response is not None and response.status_code in [404, 401]:
+                    try:
+                        error_message = response.json().get('errors', [{}])[0].get('message', error_message)
+                        return None, error_message
+                    except Exception:
+                        pass
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                if response is not None and response.status_code == 429:
+                    time.sleep(delay * 10)
+                else:
+                    return None, error_message
+        return None, "Max retries exceeded"
+
+# ------------------------------
+# Helper Function: Diff Parsing via Git
+# ------------------------------
+def parse_git_diff(commit, repo_dir):
+    """
+    Runs: git show --numstat <commit>
+    Returns list of tuples: (file_name, lines_added, lines_removed, file_status)
+    file_status is set to "modified", "new", or "deleted" based on git output.
+    """
+    try:
+        cmd = ["git", "show", "--numstat", commit]
+        output = subprocess.check_output(cmd, cwd=repo_dir, universal_newlines=True)
+        # Parse output: lines in the diff section that look like: added removed filename
+        # For binary files, values might be '-' 
+        diff_stats = []
+        for line in output.splitlines():
+            parts = line.split('\t')
+            if len(parts) == 3:
+                added_str, removed_str, file_name = parts
+                try:
+                    added = int(added_str) if added_str != '-' else 0
+                except ValueError:
+                    added = 0
+                try:
+                    removed = int(removed_str) if removed_str != '-' else 0
+                except ValueError:
+                    removed = 0
+                # Determine file_status heuristically:
+                if added > 0 and removed == 0:
+                    file_status = "new"
+                elif removed > 0 and added == 0:
+                    file_status = "deleted"
+                else:
+                    file_status = "modified"
+                diff_stats.append((file_name, added, removed, file_status))
+        return diff_stats
+    except Exception as e:
+        raise e
+
+# ------------------------------
+# Commit Processor
+# ------------------------------
+class CommitProcessor:
+    def __init__(self, api: BitbucketAPI, output_folder: str, author_email_filter: set = None, recent_branches: int = 3):
+        self.api = api
+        self.output_folder = output_folder
+        self.author_email_filter = author_email_filter
+        self.recent_branches = recent_branches
+        self.logger = logging.getLogger("CommitProcessor")
+        self.jira_pattern = r"\b[A-Z]+-\d+\b"
+        self.failed_urls = []
+        self.diff_failures = []
+
+    def get_top_branches(self, project_key: str, repo_slug: str, start_date: str, end_date: str):
+        branch_url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/branches?limit=1000"
+        response, err = self.api.make_request(branch_url)
+        if not response:
+            self.failed_urls.append({
+                "url": branch_url, "reason": err,
+                "error_category": "API Failure", "severity": "error"
+            })
+            return []
+        branches_data = response.json().get("values", [])
+        branches_with_timestamp = []
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        for branch in branches_data:
+            branch_name = branch.get("displayId")
+            latest_commit = branch.get("latestCommit")
+            if not branch_name or not latest_commit:
+                continue
+            commit_url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits/{latest_commit}"
+            commit_resp, commit_err = self.api.make_request(commit_url)
+            if not commit_resp:
+                self.failed_urls.append({
+                    "url": commit_url, "reason": commit_err,
+                    "error_category": "API Failure", "severity": "error"
+                })
+                continue
+            commit_details = commit_resp.json()
+            timestamp = commit_details.get("authorTimestamp")
+            if timestamp:
+                commit_time = datetime.fromtimestamp(timestamp / 1000)
+                if start_dt <= commit_time <= end_dt:
+                    branches_with_timestamp.append({
+                        "branch": branch_name,
+                        "timestamp": timestamp
+                    })
+        branches_sorted = sorted(branches_with_timestamp, key=lambda x: x["timestamp"], reverse=True)
+        top_branches = [b["branch"] for b in branches_sorted[:self.recent_branches]]
+        self.logger.debug(f"Top {self.recent_branches} branches for {project_key}/{repo_slug} within date range: {top_branches}")
+        return top_branches
+
+    def process_repo_with_git(self, project_key: str, repo_json: dict, start_date: str, end_date: str):
+        """
+        Implements hybrid approach:
+         - Clone the repo locally.
+         - Use API to get top branches and commit IDs.
+         - For each commit, use local Git to extract diff stats.
+         - Return output rows.
+        """
+        repo_slug = repo_json.get("slug")
+        clone_links = repo_json.get("links", {}).get("clone", [])
+        clone_url = None
+        # Prefer the HTTP clone URL
+        for link in clone_links:
+            if link.get("name") == "http":
+                clone_url = link.get("href")
+                break
+        if not clone_url and clone_links:
+            clone_url = clone_links[0].get("href")
+        if not clone_url:
+            self.logger.error(f"Clone URL not found for {project_key}/{repo_slug}")
+            return []
+        
+        self.logger.debug(f"Cloning repository {project_key}/{repo_slug} from {clone_url}")
+        temp_dir = tempfile.mkdtemp(prefix=f"{repo_slug}_")
+        try:
+            subprocess.check_call(["git", "clone", "--quiet", clone_url, temp_dir])
+        except Exception as e:
+            self.logger.error(f"Error cloning repo {project_key}/{repo_slug}: {e}")
+            shutil.rmtree(temp_dir)
+            return []
+        
+        # Now, get top branches via API
+        top_branches = self.get_top_branches(project_key, repo_slug, start_date, end_date)
+        deduped_commits = {}
+        for branch in top_branches:
+            url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits?limit=1000&until={branch}"
+            while True:
+                response, error_reason = self.api.make_request(url)
+                if not response:
+                    self.failed_urls.append({
+                        "url": url, "reason": error_reason,
+                        "error_category": "API Failure", "severity": "error"
+                    })
+                    break
+                data = response.json()
+                for commit in data.get('values', []):
+                    commit_date = datetime.fromtimestamp(commit["authorTimestamp"] / 1000)
+                    commit_month = commit_date.strftime('%Y-%m')
+                    start_month = datetime.strptime(start_date, '%Y-%m-%d').strftime('%Y-%m')
+                    end_month = datetime.strptime(end_date, '%Y-%m-%d').strftime('%Y-%m')
+                    if not (start_month <= commit_month <= end_month):
+                        continue
+                    author_email = (commit["author"].get('emailAddress') or 
+                                    commit["author"].get('emailaddress') or '').lower()
+                    if self.author_email_filter and author_email not in self.author_email_filter:
+                        continue
+                    commit_id = commit.get('id', '')
+                    if commit_id not in deduped_commits:
+                        deduped_commits[commit_id] = commit
+                if data.get("isLastPage", True):
+                    break
+                next_page = data.get('nextPageStart')
+                url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits?limit=1000&start={next_page}&until={branch}"
+        
+        output_rows = []
+        for commit in deduped_commits.values():
+            commit_date = datetime.fromtimestamp(commit["authorTimestamp"] / 1000)
+            commit_month = commit_date.strftime('%Y-%m')
+            author_name = (commit["author"].get('displayName') or 
+                           commit["author"].get('displayname') or 
+                           commit["author"].get('name') or 'Unknown Author')
+            author_email = (commit["author"].get('emailAddress') or 
+                            commit["author"].get('emailaddress') or '').lower()
+            commit_id = commit.get('id', '')
+            self.logger.debug(f"Processing commit {commit_id} in {project_key}/{repo_slug} using local Git")
+            try:
+                diff_stats = parse_git_diff(commit_id, temp_dir)
+            except Exception as e:
+                self.diff_failures.append({
+                    "url": f"Local Git for commit {commit_id}", "commit_id": commit_id,
+                    "reason": str(e),
+                    "error_category": "Diff Parsing Failure", "severity": "error"
+                })
+                continue
+            first_row = True
+            if not diff_stats:
+                self.diff_failures.append({
+                    "url": f"Local Git for commit {commit_id}", "commit_id": commit_id,
+                    "reason": "No diff data found",
+                    "error_category": "Diff Parsing Failure", "severity": "warning"
+                })
+                continue
+            for file_stat in diff_stats:
+                file_name, added, removed, file_status = file_stat
+                row = {
+                    "Project Key": project_key,
+                    "Repo Slug": repo_slug,
+                    "Author Name": author_name,
+                    "Author Email": author_email,
+                    "Month": commit_month,
+                    "File Name": file_name,
+                    "Month Lines Added": added,
+                    "Month Lines Removed": removed,
+                    "Month Lines Modified": 0,  # Git show --numstat doesn't provide modified count separately
+                    "Total Commits": 1 if first_row else 0,
+                    "Commit Id": commit_id,
+                    "File Status": file_status
+                }
+                output_rows.append(row)
+                first_row = False
+
+        # Delete local clone to free up space
+        shutil.rmtree(temp_dir)
+        self.logger.debug(f"Deleted local clone for {project_key}/{repo_slug}")
+        return output_rows
+
+    def process_commits_by_ids(self, commit_id_file: str):
+        df = pd.read_excel(commit_id_file)
+        checkpoint_file = os.path.join(self.output_folder, "commit_checkpoint.txt")
+        processed_commits = load_checkpoint(checkpoint_file)
+        df = df[~df["Commit Id"].isin(processed_commits)]
+        output_rows = []
+        for index, row in df.iterrows():
+            commit_id = row["Commit Id"]
+            project_key = row["Project Key"]
+            repo_slug = row["Repo Slug"]
+            self.logger.debug(f"Processing commit {commit_id} in {project_key}/{repo_slug} (API mode)")
+            diff_url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits/{commit_id}/diff?ignore_whitespace=true"
+            file_response, diff_error = self.api.make_request(diff_url)
+            if not file_response:
+                self.failed_urls.append({
+                    "url": diff_url, "reason": diff_error,
+                    "error_category": "API Failure", "severity": "error"
+                })
+                continue
+            try:
+                diff_data = file_response.json()
+            except Exception as e:
+                self.diff_failures.append({
+                    "url": diff_url, "commit_id": commit_id, "reason": str(e),
+                    "error_category": "Diff Parsing Failure", "severity": "error"
+                })
+                continue
+            commit_month = "Unknown"
+            if "authorTimestamp" in row:
+                try:
+                    commit_date = datetime.fromtimestamp(float(row["authorTimestamp"]) / 1000)
+                    commit_month = commit_date.strftime('%Y-%m')
+                except Exception:
+                    commit_month = "Unknown"
+            first_row = True
+            if 'diffs' not in diff_data or not diff_data['diffs']:
+                self.diff_failures.append({
+                    "url": diff_url, "commit_id": commit_id,
+                    "reason": "No diff data found",
+                    "error_category": "Diff Parsing Failure", "severity": "warning"
+                })
+                continue
+            author_name = row.get("Author Name", "Unknown")
+            author_email = row.get("Author Email", "Unknown")
+            for change in diff_data.get("diffs", []):
+                source_info = change.get('source', {})
+                dest_info = change.get('destination', {})
+                file_name = (dest_info.get('name') if dest_info and dest_info.get('name')
+                             else source_info.get('name', 'Unknown'))
+                file_status = "modified"
+                if not source_info:
+                    file_status = "new"
+                elif not dest_info:
+                    file_status = "deleted"
+                try:
+                    added, removed, modified = parse_diff_change(change)
+                    if added == 0 and removed == 0 and modified == 0 and file_status == "modified":
+                        self.diff_failures.append({
+                            "url": diff_url, "commit_id": commit_id,
+                            "reason": "No changes found in diff",
+                            "error_category": "Diff Parsing Failure", "severity": "warning"
+                        })
+                except Exception as e:
+                    self.diff_failures.append({
+                        "url": diff_url, "commit_id": commit_id,
+                        "reason": f"Exception during diff parsing: {e}",
+                        "error_category": "Diff Parsing Failure", "severity": "error"
+                    })
+                    continue
+                out_row = {
+                    "Project Key": project_key,
+                    "Repo Slug": repo_slug,
+                    "Author Name": author_name,
+                    "Author Email": author_email,
+                    "Month": commit_month,
+                    "File Name": file_name,
+                    "Month Lines Added": added,
+                    "Month Lines Removed": removed,
+                    "Month Lines Modified": modified,
+                    "Total Commits": 1 if first_row else 0,
+                    "Commit Id": commit_id,
+                    "File Status": file_status
+                }
+                output_rows.append(out_row)
+                first_row = False
+            update_checkpoint(checkpoint_file, commit_id)
+        return output_rows
+
+    def write_chunk(self, rows: list, chunk_index: int):
+        if rows:
+            df = pd.DataFrame(rows)
+            output_path = os.path.join(self.output_folder, f"commit_file_output_part_{chunk_index}.parquet")
+            df.to_parquet(output_path, engine="pyarrow", index=False)
+            self.logger.info(f"Chunk {chunk_index} written with {len(rows)} rows to {output_path}")
+        else:
+            self.logger.info(f"Chunk {chunk_index} has no rows; nothing to write.")
+
+    def write_failure_files(self):
+        if self.failed_urls:
+            df_failed = pd.DataFrame(self.failed_urls)
+            failed_path = os.path.join(self.output_folder, "failed_urls.parquet")
+            df_failed.to_parquet(failed_path, engine="pyarrow", index=False)
+            self.logger.info(f"Failed URLs written to {failed_path}")
+        if self.diff_failures:
+            df_diff_fail = pd.DataFrame(self.diff_failures)
+            diff_fail_path = os.path.join(self.output_folder, "diff_failures.parquet")
+            df_diff_fail.to_parquet(diff_fail_path, engine="pyarrow", index=False)
+            self.logger.info(f"Diff failures written to {diff_fail_path}")
+
+# ------------------------------
+# Main Processing Functions
+# ------------------------------
+def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end_date: str, recent_branches: int):
+    project_keys_file = os.path.join(input_folder, 'WTMSPK.xlsx')
+    filter_file = os.path.join(input_folder, 'author_filter.xlsx')
+    wb = load_workbook(project_keys_file)
+    sheet = wb.active
+    spk_checkpoint_file = os.path.join(output_folder, "spk_checkpoint.txt")
+    processed_spks = load_checkpoint(spk_checkpoint_file)
+    total_spks = len(list(sheet.iter_rows(min_row=2, values_only=True)))
+    spk_progress = 0
+    chunk_index = 1
+
+    filter_df = pd.read_excel(filter_file)
+    author_email_filter = set(filter_df['Author Email'].str.lower())
+
+    BITBUCKET_BASE_URL = os.getenv('BITBUCKET_BASE_URL', 'https://scm.horizon.bankofamerica.com/rest/api/latest')
+    BITBUCKET_USERNAME = os.getenv('BITBUCKET_USERNAME', '')
+    BITBUCKET_APP_PASSWORD = os.getenv('BITBUCKET_APP_PASSWORD', '')
+    token_bucket = TokenBucket(capacity=50, tokens_per_second=4)
+    api = BitbucketAPI(BITBUCKET_BASE_URL, BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD, token_bucket)
+    processor = CommitProcessor(api, output_folder, author_email_filter, recent_branches)
+
+    futures = {}
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            project_key = row[0]
+            if not project_key or project_key in processed_spks:
+                continue
+            futures[project_key] = executor.submit(process_project_with_git, project_key, processor, start_date, end_date)
+        for future in as_completed(futures):
+            spk_progress += 1
+            proj_key, rows = future.result()
+            try:
+                processor.write_chunk(rows, chunk_index)
+                chunk_index += 1
+                update_checkpoint(spk_checkpoint_file, proj_key)
+                main_logger.info(f"Finished processing project {proj_key} ({spk_progress}/{total_spks})")
+            except Exception as e:
+                main_logger.error(f"Error processing project {proj_key}: {e}")
+                processor.failed_urls.append({
+                    "url": f"Project: {proj_key}",
+                    "reason": str(e),
+                    "error_category": "Processing Failure", "severity": "error"
+                })
+    processor.write_failure_files()
+    main_logger.info(f"Total tokens consumed: {token_bucket.calls_made}")
+    main_logger.info(f"Remaining token capacity: {token_bucket.tokens}")
+
+def process_project_with_git(project_key: str, processor: CommitProcessor, start_date: str, end_date: str):
+    BITBUCKET_BASE_URL = os.getenv('BITBUCKET_BASE_URL', 'https://scm.horizon.bankofamerica.com/rest/api/latest')
+    api = processor.api
+    output_rows = []
+    repos_url = f"{BITBUCKET_BASE_URL}/projects/{project_key}/repos?limit=1000"
+    response, error_reason = api.make_request(repos_url)
+    if not response:
+        processor.failed_urls.append({
+            "url": repos_url, "reason": error_reason,
+            "error_category": "API Failure", "severity": "error"
+        })
+        return (project_key, output_rows)
+    repos_data = response.json()
+    for repo in repos_data.get('values', []):
+        repo_slug = repo.get('slug')
+        if not repo_slug:
+            continue
+        rows = processor.process_repo_with_git(project_key, repo, start_date, end_date)
+        output_rows.extend(rows)
+    return (project_key, output_rows)
+
+def process_commit_mode(input_folder: str, output_folder: str, chunk_size: int = 1000):
+    commit_id_file = os.path.join(input_folder, 'commit_ids.xlsx')
+    commit_checkpoint_file = os.path.join(output_folder, "commit_checkpoint.txt")
+    processed_commits = load_checkpoint(commit_checkpoint_file)
+    BITBUCKET_BASE_URL = os.getenv('BITBUCKET_BASE_URL', 'https://scm.horizon.bankofamerica.com/rest/api/latest')
+    BITBUCKET_USERNAME = os.getenv('BITBUCKET_USERNAME', '')
+    BITBUCKET_APP_PASSWORD = os.getenv('BITBUCKET_APP_PASSWORD', '')
+    token_bucket = TokenBucket(capacity=50, tokens_per_second=4)
+    api = BitbucketAPI(BITBUCKET_BASE_URL, BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD, token_bucket)
+    processor = CommitProcessor(api, output_folder)
+    
+    df = pd.read_excel(commit_id_file)
+    df = df[~df["Commit Id"].isin(processed_commits)]
+    total_commits = len(df)
+    main_logger.info(f"Total commit IDs to process: {total_commits}")
+    chunk_index = 1
+
+    for start in range(0, total_commits, chunk_size):
+        chunk_df = df.iloc[start:start+chunk_size]
+        rows = process_commit_chunk(processor, chunk_df)
+        processor.write_chunk(rows, chunk_index)
+        for commit_id in chunk_df["Commit Id"]:
+            update_checkpoint(commit_checkpoint_file, str(commit_id))
+        main_logger.info(f"Processed commit chunk {chunk_index}: rows {start+1} to {min(start+chunk_size, total_commits)}")
+        chunk_index += 1
+
+    processor.write_failure_files()
+    main_logger.info(f"Total tokens consumed: {token_bucket.calls_made}")
+    main_logger.info(f"Remaining token capacity: {token_bucket.tokens}")
+
+def process_commit_chunk(processor: 'CommitProcessor', chunk_df: pd.DataFrame):
+    output_rows = []
+    for index, row in chunk_df.iterrows():
+        commit_id = row["Commit Id"]
+        project_key = row["Project Key"]
+        repo_slug = row["Repo Slug"]
+        processor.logger.debug(f"Processing commit {commit_id} in {project_key}/{repo_slug} (API mode)")
+        diff_url = f"{processor.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits/{commit_id}/diff?ignore_whitespace=true"
+        file_response, diff_error = processor.api.make_request(diff_url)
+        if not file_response:
+            processor.failed_urls.append({
+                "url": diff_url, "reason": diff_error,
+                "error_category": "API Failure", "severity": "error"
+            })
+            continue
+        try:
+            diff_data = file_response.json()
+        except Exception as e:
+            processor.diff_failures.append({
+                "url": diff_url, "commit_id": commit_id, "reason": str(e),
+                "error_category": "Diff Parsing Failure", "severity": "error"
+            })
+            continue
+        commit_month = "Unknown"
+        if "authorTimestamp" in row:
+            try:
+                commit_date = datetime.fromtimestamp(float(row["authorTimestamp"]) / 1000)
+                commit_month = commit_date.strftime('%Y-%m')
+            except Exception:
+                commit_month = "Unknown"
+        first_row = True
+        if 'diffs' not in diff_data or not diff_data['diffs']:
+            processor.diff_failures.append({
+                "url": diff_url, "commit_id": commit_id,
+                "reason": "No diff data found",
+                "error_category": "Diff Parsing Failure", "severity": "warning"
+            })
+            continue
+        author_name = row.get("Author Name", "Unknown")
+        author_email = row.get("Author Email", "Unknown")
+        for change in diff_data.get("diffs", []):
+            source_info = change.get('source', {})
+            dest_info = change.get('destination', {})
+            file_name = (dest_info.get('name') if dest_info and dest_info.get('name')
+                         else source_info.get('name', 'Unknown'))
+            file_status = "modified"
+            if not source_info:
+                file_status = "new"
+            elif not dest_info:
+                file_status = "deleted"
+            try:
+                added, removed, modified = parse_diff_change(change)
+                if added == 0 and removed == 0 and modified == 0 and file_status == "modified":
+                    processor.diff_failures.append({
+                        "url": diff_url, "commit_id": commit_id,
+                        "reason": "No changes found in diff",
+                        "error_category": "Diff Parsing Failure", "severity": "warning"
+                    })
+            except Exception as e:
+                processor.diff_failures.append({
+                    "url": diff_url, "commit_id": commit_id,
+                    "reason": f"Exception during diff parsing: {e}",
+                    "error_category": "Diff Parsing Failure", "severity": "error"
+                })
+                continue
+            out_row = {
+                "Project Key": project_key,
+                "Repo Slug": repo_slug,
+                "Author Name": author_name,
+                "Author Email": author_email,
+                "Month": commit_month,
+                "File Name": file_name,
+                "Month Lines Added": added,
+                "Month Lines Removed": removed,
+                "Month Lines Modified": modified,
+                "Total Commits": 1 if first_row else 0,
+                "Commit Id": commit_id,
+                "File Status": file_status
+            }
+            output_rows.append(out_row)
+            first_row = False
+    return output_rows
+
+# ------------------------------
+# Main Entry Point with Argument Parsing
+# ------------------------------
+def main():
+    parser = argparse.ArgumentParser(description="Process Bitbucket commits.")
+    parser.add_argument('--mode', choices=['spk', 'commit'], default='spk',
+                        help="Input mode: 'spk' for SPK list mode, 'commit' for commit id mode.")
+    parser.add_argument('--start_date', default='2024-01-01',
+                        help="Start date (YYYY-MM-DD) for commit filtering (only used in SPK mode).")
+    parser.add_argument('--end_date', default='2025-03-31',
+                        help="End date (YYYY-MM-DD) for commit filtering (only used in SPK mode).")
+    parser.add_argument('--recent_branches', type=int, default=3,
+                        help="Number of recent branches to process (only used in SPK mode).")
+    parser.add_argument('--commit_chunk_size', type=int, default=1000,
+                        help="Chunk size for processing commit mode.")
+    args = parser.parse_args()
+
+    common_folder = "C:/Riskportal/3Mar2025_JavaTrainings"
+    input_folder = os.path.join(common_folder, "input")
+    output_folder = os.path.join(common_folder, "output")
+
+    if args.mode == 'spk':
+        main_logger.info("Running in SPK mode.")
+        process_spk_mode(input_folder, output_folder, args.start_date, args.end_date, args.recent_branches)
+    elif args.mode == 'commit':
+        main_logger.info("Running in Commit Id mode.")
+        process_commit_mode(input_folder, output_folder, args.commit_chunk_size)
+
+if __name__ == "__main__":
+    main()
