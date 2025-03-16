@@ -29,7 +29,7 @@ class JsonFormatter(logging.Formatter):
             log_record["severity"] = record.severity
         return json.dumps(log_record)
 
-# Setup logging: both console and file handlers.
+# Setup logging function: logs to console and a file in the output folder.
 def configure_logging(output_folder):
     output_log_path = os.path.join(output_folder, "process_log.txt")
     console_handler = logging.StreamHandler()
@@ -39,7 +39,7 @@ def configure_logging(output_folder):
     logging.basicConfig(level=logging.DEBUG, handlers=[console_handler, file_handler])
     return logging.getLogger("Main")
 
-main_logger = None  # will be set later in main()
+main_logger = None  # Will be set in main().
 
 # ------------------------------
 # Token Bucket for Rate Limiting with Consumption Tracking
@@ -98,7 +98,8 @@ class BitbucketAPI:
                 error_message = str(e)
                 status_code = response.status_code if response is not None else "N/A"
                 if response is not None and response.status_code == 429:
-                    self.logger.critical(f"429 Too Many Requests encountered for {url}!", extra={"error_category": "Rate Limit", "severity": "critical"})
+                    self.logger.critical(f"429 Too Many Requests encountered for {url}!", 
+                                           extra={"error_category": "Rate Limit", "severity": "critical"})
                 extra = {"error_category": "API Failure", "severity": "error"}
                 self.logger.error(f"Request failed for {url}: {error_message} (Status: {status_code})", extra=extra)
                 if response is not None and response.status_code in [404, 401]:
@@ -121,7 +122,7 @@ class BitbucketAPI:
 def parse_diff_change(change: dict) -> (int, int, int):
     lines_added = 0
     lines_removed = 0
-    lines_modified = 0  # (Not separately provided by the API)
+    lines_modified = 0  # (API doesn't separately provide modified count)
     try:
         for hunk in change.get('hunks', []):
             for segment in hunk.get('segments', []):
@@ -141,7 +142,7 @@ def parse_diff_change(change: dict) -> (int, int, int):
 # ------------------------------
 class CommitProcessor:
     def __init__(self, api: BitbucketAPI, output_folder: str, author_email_filter: set = None, recent_branches: int = 5):
-        # recent_branches is now set to 5.
+        # recent_branches is set to 5.
         self.api = api
         self.output_folder = output_folder
         self.author_email_filter = author_email_filter
@@ -222,7 +223,6 @@ class CommitProcessor:
             if self.author_email_filter and author_email not in self.author_email_filter:
                 continue
             commit_id = commit.get('id', '')
-            # Output commit metadata for collection.
             row = {
                 "Project Key": project_key,
                 "Repo Slug": repo_slug,
@@ -236,13 +236,13 @@ class CommitProcessor:
         return output_rows
 
     def process_commits_by_ids(self, commit_id_file: str):
-        # Commit mode processing.
+        # Process commit IDs from commit_ids.xlsx. Column names are expected in uppercase.
         df = pd.read_excel(commit_id_file)
         output_rows = []
         for index, row in df.iterrows():
-            commit_id = row["Commit Id"]
-            project_key = row["Project Key"]
-            repo_slug = row["Repo Slug"]
+            commit_id = row["COMMIT_ID"]
+            project_key = row["SPK"]
+            repo_slug = row["REPOSITORY_NAME"]
             self.logger.debug(f"Processing commit {commit_id} in {project_key}/{repo_slug} (API mode)")
             diff_url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits/{commit_id}/diff?ignore_whitespace=true"
             file_response, diff_error = self.api.make_request(diff_url)
@@ -265,13 +265,7 @@ class CommitProcessor:
                     "severity": "error"
                 })
                 continue
-            commit_month = "Unknown"
-            if "authorTimestamp" in row:
-                try:
-                    commit_date = datetime.fromtimestamp(float(row["authorTimestamp"]) / 1000)
-                    commit_month = commit_date.strftime('%Y-%m')
-                except Exception:
-                    commit_month = "Unknown"
+            commit_month = "Unknown"  # No timestamp provided in commit_ids.xlsx
             first_row = True
             if 'diffs' not in diff_data or not diff_data['diffs']:
                 self.diff_failures.append({
@@ -282,8 +276,8 @@ class CommitProcessor:
                     "severity": "warning"
                 })
                 continue
-            author_name = row.get("Author Name", "Unknown")
-            author_email = row.get("Author Email", "Unknown")
+            author_name = row.get("FULL_NAME", "Unknown")
+            author_email = row.get("EMAIL_ID", "Unknown").lower()
             for change in diff_data.get("diffs", []):
                 source_info = change.get('source', {})
                 dest_info = change.get('destination', {})
@@ -377,7 +371,7 @@ def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end
     BITBUCKET_APP_PASSWORD = os.getenv('BITBUCKET_APP_PASSWORD', '')
     token_bucket = TokenBucket(capacity=70, tokens_per_second=1)
     api = BitbucketAPI(BITBUCKET_BASE_URL, BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD, token_bucket)
-    # Set recent_branches as provided (default 5).
+    # Use recent_branches as provided (default 5)
     processor = CommitProcessor(api, output_folder, author_email_filter, recent_branches=recent_branches)
 
     successful_repos = 0
@@ -452,7 +446,8 @@ def process_commit_mode(input_folder: str, output_folder: str, chunk_size: int =
         rows = process_commit_chunk(processor, chunk_df)
         filename = f"commit_output_part_{chunk_index}"
         processor.write_chunk(rows, chunk_index, filename_prefix=filename)
-        main_logger.info(f"Processed commit chunk {chunk_index}: rows {start+1} to {min(start+chunk_size, total_commits)} (Output file: {filename}.parquet)")
+        processed = min(start+chunk_size, total_commits)
+        main_logger.info(f"Processed {processed} out of {total_commits} commit IDs (Chunk {chunk_index}: Output file: {filename}.parquet)")
         chunk_index += 1
 
     processor.write_failure_files()
@@ -462,9 +457,9 @@ def process_commit_mode(input_folder: str, output_folder: str, chunk_size: int =
 def process_commit_chunk(processor: 'CommitProcessor', chunk_df: pd.DataFrame):
     output_rows = []
     for index, row in chunk_df.iterrows():
-        commit_id = row["Commit Id"]
-        project_key = row["Project Key"]
-        repo_slug = row["Repo Slug"]
+        commit_id = row["COMMIT_ID"]
+        project_key = row["SPK"]
+        repo_slug = row["REPOSITORY_NAME"]
         processor.logger.debug(f"Processing commit {commit_id} in {project_key}/{repo_slug} (API mode)")
         diff_url = f"{processor.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits/{commit_id}/diff?ignore_whitespace=true"
         file_response, diff_error = processor.api.make_request(diff_url)
@@ -487,13 +482,7 @@ def process_commit_chunk(processor: 'CommitProcessor', chunk_df: pd.DataFrame):
                 "severity": "error"
             })
             continue
-        commit_month = "Unknown"
-        if "authorTimestamp" in row:
-            try:
-                commit_date = datetime.fromtimestamp(float(row["authorTimestamp"]) / 1000)
-                commit_month = commit_date.strftime('%Y-%m')
-            except Exception:
-                commit_month = "Unknown"
+        commit_month = "Unknown"  # Timestamp not available in commit_ids.xlsx
         first_row = True
         if 'diffs' not in diff_data or not diff_data['diffs']:
             processor.diff_failures.append({
@@ -504,8 +493,8 @@ def process_commit_chunk(processor: 'CommitProcessor', chunk_df: pd.DataFrame):
                 "severity": "warning"
             })
             continue
-        author_name = row.get("Author Name", "Unknown")
-        author_email = row.get("Author Email", "Unknown")
+        author_name = row.get("FULL_NAME", "Unknown")
+        author_email = row.get("EMAIL_ID", "Unknown").lower()
         for change in diff_data.get("diffs", []):
             source_info = change.get('source', {})
             dest_info = change.get('destination', {})
@@ -558,18 +547,18 @@ def process_commit_chunk(processor: 'CommitProcessor', chunk_df: pd.DataFrame):
 # ------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Process Bitbucket commits (API-only).")
-    parser.add_argument('--mode', choices=['spk', 'commit'], default='spk',
-                        help="Input mode: 'spk' for SPK list mode, 'commit' for commit id mode.")
+    parser.add_argument('--mode', choices=['spk', 'commit'], default='commit',
+                        help="Input mode: 'spk' for SPK list mode, 'commit' for commit id mode. (Default: commit)")
     parser.add_argument('--start_date', default='2024-01-01',
-                        help="Start date (YYYY-MM-DD) for commit filtering (only used in SPK mode).")
+                        help="Start date (YYYY-MM-DD) for commit filtering (used in SPK mode).")
     parser.add_argument('--end_date', default='2025-03-31',
-                        help="End date (YYYY-MM-DD) for commit filtering (only used in SPK mode).")
+                        help="End date (YYYY-MM-DD) for commit filtering (used in SPK mode).")
     parser.add_argument('--recent_branches', type=int, default=5,
-                        help="Number of recent branches to process (only used in SPK mode).")
+                        help="Number of recent branches to process in SPK mode (default: 5).")
     parser.add_argument('--order', choices=['top-down', 'bottom-up'], default='top-down',
                         help="Processing order for SPKs (top-down or bottom-up).")
     parser.add_argument('--commit_chunk_size', type=int, default=10000,
-                        help="Chunk size for processing commit mode.")
+                        help="Chunk size for processing commit mode (default: 10000).")
     args = parser.parse_args()
 
     common_folder = "C:/Riskportal/3Mar2025_JavaTrainings"
