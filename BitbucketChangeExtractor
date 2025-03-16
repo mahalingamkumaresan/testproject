@@ -125,7 +125,7 @@ class BitbucketAPI:
 def parse_diff_change(change: dict) -> (int, int, int):
     lines_added = 0
     lines_removed = 0
-    lines_modified = 0
+    lines_modified = 0  # Some APIs don't provide a separate modified count.
     try:
         for hunk in change.get('hunks', []):
             for segment in hunk.get('segments', []):
@@ -151,17 +151,17 @@ def calculate_complexity_and_details(change: dict) -> (int, dict):
 # ------------------------------
 class CommitProcessor:
     def __init__(self, api: BitbucketAPI, output_folder: str, author_email_filter: set = None, recent_branches: int = 1):
-        # Note: For SPK mode we now use only the top 1 branch.
+        # Note: recent_branches is now fixed to 1 (top 1 branch)
         self.api = api
         self.output_folder = output_folder
         self.author_email_filter = author_email_filter
-        self.recent_branches = recent_branches  # This will be 1 in our SPK mode.
+        self.recent_branches = recent_branches
         self.logger = logging.getLogger("CommitProcessor")
         self.jira_pattern = r"\b[A-Z]+-\d+\b"
         self.failed_urls = []
         self.diff_failures = []
 
-    def get_top_branches(self, project_key: str, repo_slug: str, start_date: str, end_date: str):
+    def get_top_branch(self, project_key: str, repo_slug: str, start_date: str, end_date: str):
         branch_url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/branches?limit=1000"
         response, err = self.api.make_request(branch_url)
         if not response:
@@ -169,7 +169,7 @@ class CommitProcessor:
                 "url": branch_url, "reason": err,
                 "error_category": "API Failure", "severity": "error"
             })
-            return []
+            return None
         branches_data = response.json().get("values", [])
         branches_with_timestamp = []
         start_dt = datetime.strptime(start_date, '%Y-%m-%d')
@@ -196,38 +196,42 @@ class CommitProcessor:
                         "branch": branch_name,
                         "timestamp": timestamp
                     })
-        branches_sorted = sorted(branches_with_timestamp, key=lambda x: x["timestamp"], reverse=True)
-        top_branches = [b["branch"] for b in branches_sorted[:self.recent_branches]]
-        self.logger.debug(f"Top {self.recent_branches} branch for {project_key}/{repo_slug} within date range: {top_branches}")
-        return top_branches
+        if not branches_with_timestamp:
+            self.logger.debug(f"No branches found for {project_key}/{repo_slug} within date range")
+            return None
+        # Sort descending by timestamp and pick the top one.
+        top_branch = sorted(branches_with_timestamp, key=lambda x: x["timestamp"], reverse=True)[0]["branch"]
+        self.logger.debug(f"Top branch for {project_key}/{repo_slug} within date range: {top_branch}")
+        return top_branch
 
     def process_commits_spk(self, project_key: str, repo_slug: str, start_date: str, end_date: str):
-        # No pagination: we call commit endpoint only once per branch.
+        # Disable pagination: we only fetch the first page.
         deduped_commits = {}
-        top_branches = self.get_top_branches(project_key, repo_slug, start_date, end_date)
-        for branch in top_branches:
-            url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits?limit=1000&until={branch}"
-            response, error_reason = self.api.make_request(url)
-            if not response:
-                self.failed_urls.append({
-                    "url": url, "reason": error_reason,
-                    "error_category": "API Failure", "severity": "error"
-                })
+        top_branch = self.get_top_branch(project_key, repo_slug, start_date, end_date)
+        if not top_branch:
+            return []
+        url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits?limit=1000&until={top_branch}"
+        response, error_reason = self.api.make_request(url)
+        if not response:
+            self.failed_urls.append({
+                "url": url, "reason": error_reason,
+                "error_category": "API Failure", "severity": "error"
+            })
+            return []
+        data = response.json()
+        for commit in data.get('values', []):
+            commit_date = datetime.fromtimestamp(commit["authorTimestamp"] / 1000)
+            commit_month = commit_date.strftime('%Y-%m')
+            start_month = datetime.strptime(start_date, '%Y-%m-%d').strftime('%Y-%m')
+            end_month = datetime.strptime(end_date, '%Y-%m-%d').strftime('%Y-%m')
+            if not (start_month <= commit_month <= end_month):
                 continue
-            data = response.json()
-            for commit in data.get('values', []):
-                commit_date = datetime.fromtimestamp(commit["authorTimestamp"] / 1000)
-                commit_month = commit_date.strftime('%Y-%m')
-                start_month = datetime.strptime(start_date, '%Y-%m-%d').strftime('%Y-%m')
-                end_month = datetime.strptime(end_date, '%Y-%m-%d').strftime('%Y-%m')
-                if not (start_month <= commit_month <= end_month):
-                    continue
-                author_email = (commit["author"].get('emailAddress') or commit["author"].get('emailaddress') or '').lower()
-                if self.author_email_filter and author_email not in self.author_email_filter:
-                    continue
-                commit_id = commit.get('id', '')
-                if commit_id not in deduped_commits:
-                    deduped_commits[commit_id] = commit
+            author_email = (commit["author"].get('emailAddress') or commit["author"].get('emailaddress') or '').lower()
+            if self.author_email_filter and author_email not in self.author_email_filter:
+                continue
+            commit_id = commit.get('id', '')
+            if commit_id not in deduped_commits:
+                deduped_commits[commit_id] = commit
         output_rows = []
         for commit in deduped_commits.values():
             commit_date = datetime.fromtimestamp(commit["authorTimestamp"] / 1000)
@@ -307,7 +311,7 @@ class CommitProcessor:
         return output_rows
 
     def process_commits_by_ids(self, commit_id_file: str):
-        # Commit mode processing remains unchanged.
+        # (Commit mode remains unchanged.)
         df = pd.read_excel(commit_id_file)
         checkpoint_file = os.path.join(self.output_folder, "commit_checkpoint.txt")
         processed_commits = load_checkpoint(checkpoint_file)
@@ -403,9 +407,9 @@ class CommitProcessor:
             else:
                 output_path = os.path.join(self.output_folder, f"commit_file_output_part_{chunk_index}.parquet")
             df.to_parquet(output_path, engine="pyarrow", index=False)
-            self.logger.info(f"Chunk {chunk_index} written with {len(rows)} rows to {output_path}")
+            self.logger.info(f"Output written with {len(rows)} rows to {output_path}")
         else:
-            self.logger.info(f"Chunk {chunk_index} has no rows; nothing to write.")
+            self.logger.info(f"No rows to write for chunk {chunk_index}.")
 
     def write_failure_files(self):
         if self.failed_urls:
@@ -420,7 +424,7 @@ class CommitProcessor:
             self.logger.info(f"Diff failures written to {diff_fail_path}")
 
 # ------------------------------
-# Main Processing Functions for SPK Mode (API-only)
+# Main Processing Functions for SPK Mode (API-Only)
 # ------------------------------
 def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end_date: str, recent_branches: int, order: str):
     project_keys_file = os.path.join(input_folder, 'WTMSPK.xlsx')
@@ -429,6 +433,7 @@ def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end
     sheet = wb.active
     spk_checkpoint_file = os.path.join(output_folder, "spk_checkpoint.txt")
     processed_spks = load_checkpoint(spk_checkpoint_file)
+    
     spk_rows = list(sheet.iter_rows(min_row=2, values_only=True))
     total_spks = len(spk_rows)
     if order == "bottom-up":
@@ -443,11 +448,11 @@ def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end
     BITBUCKET_APP_PASSWORD = os.getenv('BITBUCKET_APP_PASSWORD', '')
     token_bucket = TokenBucket(capacity=70, tokens_per_second=1)
     api = BitbucketAPI(BITBUCKET_BASE_URL, BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD, token_bucket)
-    # For SPK mode, we force recent_branches to 1.
+    # Set recent_branches to 1 per requirements.
     processor = CommitProcessor(api, output_folder, author_email_filter, recent_branches=1)
 
-    futures = {}
     with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {}
         for row in spk_rows:
             project_key = row[0]
             if not project_key or project_key in processed_spks:
@@ -455,7 +460,7 @@ def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end
             futures[project_key] = executor.submit(process_project, project_key, processor, start_date, end_date)
         for future in as_completed(futures):
             spk_progress += 1
-            proj_key, repo_outputs = future.result()  # repo_outputs is a list of (repo_slug, output_rows) tuples.
+            proj_key, repo_outputs = future.result()  # repo_outputs: list of (repo_slug, output_rows)
             for repo_slug, rows in repo_outputs:
                 filename = f"output_{proj_key}_{repo_slug}"
                 processor.write_chunk(rows, 1, filename_prefix=filename)
@@ -469,7 +474,7 @@ def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end
 def process_project(project_key: str, processor: CommitProcessor, start_date: str, end_date: str):
     BITBUCKET_BASE_URL = os.getenv('BITBUCKET_BASE_URL', 'https://scm.horizon.bankofamerica.com/rest/api/latest')
     api = processor.api
-    repo_outputs = []  # Will hold tuples: (repo_slug, output_rows)
+    repo_outputs = []  # Each element: (repo_slug, output_rows)
     repos_url = f"{BITBUCKET_BASE_URL}/projects/{project_key}/repos?limit=1000"
     response, error_reason = api.make_request(repos_url)
     if not response:
@@ -488,68 +493,35 @@ def process_project(project_key: str, processor: CommitProcessor, start_date: st
     return (project_key, repo_outputs)
 
 # ------------------------------
-# Main Processing Functions for Commit Mode (unchanged with batching)
+# Main Entry Point with Argument Parsing
 # ------------------------------
-def process_commit_mode(input_folder: str, output_folder: str, chunk_size: int = 1000):
-    commit_id_file = os.path.join(input_folder, 'commit_ids.xlsx')
-    commit_checkpoint_file = os.path.join(output_folder, "commit_checkpoint.txt")
-    processed_commits = load_checkpoint(commit_checkpoint_file)
-    BITBUCKET_BASE_URL = os.getenv('BITBUCKET_BASE_URL', 'https://scm.horizon.bankofamerica.com/rest/api/latest')
-    BITBUCKET_USERNAME = os.getenv('BITBUCKET_USERNAME', '')
-    BITBUCKET_APP_PASSWORD = os.getenv('BITBUCKET_APP_PASSWORD', '')
-    token_bucket = TokenBucket(capacity=70, tokens_per_second=1)
-    api = BitbucketAPI(BITBUCKET_BASE_URL, BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD, token_bucket)
-    processor = CommitProcessor(api, output_folder)
-    
-    df = pd.read_excel(commit_id_file)
-    df = df[~df["Commit Id"].isin(processed_commits)]
-    total_commits = len(df)
-    main_logger.info(f"Total commit IDs to process: {total_commits}")
-    chunk_index = 1
+def main():
+    parser = argparse.ArgumentParser(description="Process Bitbucket commits (API-only, SPK mode).")
+    parser.add_argument('--mode', choices=['spk', 'commit'], default='spk',
+                        help="Input mode: 'spk' for SPK list mode, 'commit' for commit id mode.")
+    parser.add_argument('--start_date', default='2024-01-01',
+                        help="Start date (YYYY-MM-DD) for commit filtering (only used in SPK mode).")
+    parser.add_argument('--end_date', default='2025-03-31',
+                        help="End date (YYYY-MM-DD) for commit filtering (only used in SPK mode).")
+    parser.add_argument('--recent_branches', type=int, default=1,
+                        help="Number of recent branches to process (only used in SPK mode; now fixed to 1).")
+    parser.add_argument('--order', choices=['top-down', 'bottom-up'], default='top-down',
+                        help="Processing order for SPKs (top-down or bottom-up).")
+    parser.add_argument('--commit_chunk_size', type=int, default=1000,
+                        help="Chunk size for processing commit mode (if used).")
+    args = parser.parse_args()
 
-    for start in range(0, total_commits, chunk_size):
-        chunk_df = df.iloc[start:start+chunk_size]
-        rows = process_commit_chunk(processor, chunk_df)
-        filename = f"commit_output_part_{chunk_index}"
-        processor.write_chunk(rows, chunk_index, filename_prefix=filename)
-        for commit_id in chunk_df["Commit Id"]:
-            update_checkpoint(commit_checkpoint_file, str(commit_id))
-        main_logger.info(f"Processed commit chunk {chunk_index}: rows {start+1} to {min(start+chunk_size, total_commits)} (Output file: {filename}.parquet)")
-        chunk_index += 1
+    common_folder = "C:/Riskportal/3Mar2025_JavaTrainings"
+    input_folder = os.path.join(common_folder, "input")
+    output_folder = os.path.join(common_folder, "output")
 
-    processor.write_failure_files()
-    main_logger.info(f"Total tokens consumed: {token_bucket.calls_made}")
-    main_logger.info(f"Remaining token capacity: {token_bucket.tokens}")
+    if args.mode == 'spk':
+        main_logger.info("Running in SPK mode (API-only, no pagination, top 1 branch per repo).")
+        process_spk_mode(input_folder, output_folder, args.start_date, args.end_date, args.recent_branches, args.order)
+    elif args.mode == 'commit':
+        # Commit mode remains unchanged
+        main_logger.info("Running in Commit Id mode.")
+        process_commit_mode(input_folder, output_folder, args.commit_chunk_size)
 
-def process_commit_chunk(processor: 'CommitProcessor', chunk_df: pd.DataFrame):
-    output_rows = []
-    for index, row in chunk_df.iterrows():
-        commit_id = row["Commit Id"]
-        project_key = row["Project Key"]
-        repo_slug = row["Repo Slug"]
-        processor.logger.debug(f"Processing commit {commit_id} in {project_key}/{repo_slug} (API mode)")
-        diff_url = f"{processor.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits/{commit_id}/diff?ignore_whitespace=true"
-        file_response, diff_error = processor.api.make_request(diff_url)
-        if not file_response:
-            processor.failed_urls.append({
-                "url": diff_url, "reason": diff_error,
-                "error_category": "API Failure", "severity": "error"
-            })
-            continue
-        try:
-            diff_data = file_response.json()
-        except Exception as e:
-            processor.diff_failures.append({
-                "url": diff_url, "commit_id": commit_id, "reason": str(e),
-                "error_category": "Diff Parsing Failure", "severity": "error"
-            })
-            continue
-        commit_month = "Unknown"
-        if "authorTimestamp" in row:
-            try:
-                commit_date = datetime.fromtimestamp(float(row["authorTimestamp"]) / 1000)
-                commit_month = commit_date.strftime('%Y-%m')
-            except Exception:
-                commit_month = "Unknown"
-        first_row = True
-        if 'diffs' not in diff_data or
+if __name__ == "__main__":
+    main()
