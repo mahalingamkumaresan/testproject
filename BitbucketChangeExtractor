@@ -5,6 +5,7 @@ import json
 import time
 import os
 import glob
+import random
 import pandas as pd
 import requests
 import argparse
@@ -12,20 +13,20 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openpyxl import load_workbook
 from requests.adapters import HTTPAdapter
+from typing import Tuple, Optional, List, Dict, Set
 
-# Suppress insecure request warnings.
+# Suppress InsecureRequestWarning.
 requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
-
 # Suppress logs from urllib3.
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
-# Raise CommitProcessor logging level so only warnings and above are logged.
+# Set CommitProcessor logging to WARNING.
 logging.getLogger("CommitProcessor").setLevel(logging.WARNING)
 
 # ------------------------------
 # Custom JSON Logging Formatter
 # ------------------------------
 class JsonFormatter(logging.Formatter):
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         log_record = {
             "timestamp": self.formatTime(record, self.datefmt),
             "level": record.levelname,
@@ -38,8 +39,7 @@ class JsonFormatter(logging.Formatter):
             log_record["severity"] = record.severity
         return json.dumps(log_record)
 
-# Setup logging: logs to console and file.
-def configure_logging(output_folder):
+def configure_logging(output_folder: str) -> logging.Logger:
     output_log_path = os.path.join(output_folder, "process_log.txt")
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(JsonFormatter())
@@ -48,13 +48,13 @@ def configure_logging(output_folder):
     logging.basicConfig(level=logging.DEBUG, handlers=[console_handler, file_handler])
     return logging.getLogger("Main")
 
-main_logger = None  # Will be set in main().
+main_logger: Optional[logging.Logger] = None  # Will be set in main().
 
 # ------------------------------
 # Utility: Load processed commit IDs from existing Parquet files.
 # ------------------------------
-def load_processed_commit_ids(output_folder):
-    processed = set()
+def load_processed_commit_ids(output_folder: str) -> Set[str]:
+    processed: Set[str] = set()
     for file in glob.glob(os.path.join(output_folder, "commit_output_part_*.parquet")):
         try:
             df_existing = pd.read_parquet(file, engine="pyarrow")
@@ -67,10 +67,25 @@ def load_processed_commit_ids(output_folder):
     return processed
 
 # ------------------------------
-# Token Bucket for Rate Limiting
+# Helper Functions: Sanitize map objects.
+# ------------------------------
+def sanitize_map_objects(value):
+    if isinstance(value, map):
+        return list(value)
+    return value
+
+def sanitize_rows(rows: List[Dict]) -> List[Dict]:
+    sanitized = []
+    for row in rows:
+        new_row = {k: sanitize_map_objects(v) for k, v in row.items()}
+        sanitized.append(new_row)
+    return sanitized
+
+# ------------------------------
+# Token Bucket for Rate Limiting with Exponential Backoff
 # ------------------------------
 class TokenBucket:
-    def __init__(self, capacity: int, tokens_per_second: float):
+    def __init__(self, capacity: int, tokens_per_second: float) -> None:
         self.capacity = capacity
         self.tokens_per_second = tokens_per_second
         self.tokens = capacity
@@ -78,7 +93,7 @@ class TokenBucket:
         self.lock = threading.Lock()
         self.calls_made = 0
 
-    def consume(self, tokens: int = 1):
+    def consume(self, tokens: int = 1) -> None:
         while True:
             with self.lock:
                 now = time.time()
@@ -94,10 +109,10 @@ class TokenBucket:
             time.sleep(0.1)
 
 # ------------------------------
-# Bitbucket API Wrapper with Increased Connection Pool
+# Bitbucket API Wrapper with Increased Connection Pool and Exponential Backoff
 # ------------------------------
 class BitbucketAPI:
-    def __init__(self, base_url: str, username: str, app_password: str, token_bucket: TokenBucket):
+    def __init__(self, base_url: str, username: str, app_password: str, token_bucket: TokenBucket) -> None:
         self.base_url = base_url
         self.username = username
         self.app_password = app_password
@@ -105,12 +120,12 @@ class BitbucketAPI:
         self.session = requests.Session()
         self.session.auth = (self.username, self.app_password)
         self.session.verify = False
-        adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50)
+        adapter = HTTPAdapter(pool_connections=200, pool_maxsize=200)
         self.session.mount('http://', adapter)
         self.session.mount('https://', adapter)
         self.logger = logging.getLogger("BitbucketAPI")
 
-    def make_request(self, url: str, retries: int = 2, delay: int = 2):
+    def make_request(self, url: str, retries: int = 2, base_delay: int = 2) -> Tuple[Optional[requests.Response], Optional[str]]:
         response = None
         for attempt in range(retries):
             self.token_bucket.consume(1)
@@ -123,8 +138,10 @@ class BitbucketAPI:
                 error_message = str(e)
                 status_code = response.status_code if response is not None else "N/A"
                 if response is not None and response.status_code == 429:
-                    self.logger.critical(f"429 Too Many Requests encountered for {url}!",
-                                           extra={"error_category": "Rate Limit", "severity": "critical"})
+                    self.logger.critical(
+                        f"429 Too Many Requests encountered for {url}!",
+                        extra={"error_category": "Rate Limit", "severity": "critical"}
+                    )
                 extra = {"error_category": "API Failure", "severity": "error"}
                 self.logger.error(f"Request failed for {url}: {error_message} (Status: {status_code})", extra=extra)
                 if response is not None and response.status_code in [404, 401]:
@@ -133,18 +150,18 @@ class BitbucketAPI:
                         return None, error_message
                     except Exception:
                         pass
-                if attempt < retries - 1:
-                    time.sleep(delay)
+                sleep_time = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                time.sleep(sleep_time)
                 if response is not None and response.status_code == 429:
-                    time.sleep(delay * 10)
+                    time.sleep(base_delay * 10)
                 else:
-                    return None, error_message
+                    continue
         return None, "Max retries exceeded"
 
 # ------------------------------
 # Helper Function: Diff Parsing from API Response
 # ------------------------------
-def parse_diff_change(change: dict) -> (int, int, int):
+def parse_diff_change(change: dict) -> Tuple[int, int, int]:
     lines_added = 0
     lines_removed = 0
     lines_modified = 0
@@ -163,19 +180,19 @@ def parse_diff_change(change: dict) -> (int, int, int):
     return lines_added, lines_removed, lines_modified
 
 # ------------------------------
-# Commit Processor: API-Only Approach for SPK Mode (Commit Collector)
+# Commit Processor: API-Only for SPK Mode (Commit Collector)
 # ------------------------------
 class CommitProcessor:
-    def __init__(self, api: BitbucketAPI, output_folder: str, author_email_filter: set = None, recent_branches: int = 5):
+    def __init__(self, api: BitbucketAPI, output_folder: str, author_email_filter: Optional[Set[str]] = None, recent_branches: int = 5) -> None:
         self.api = api
         self.output_folder = output_folder
         self.author_email_filter = author_email_filter
         self.recent_branches = recent_branches
         self.logger = logging.getLogger("CommitProcessor")
-        self.failed_urls = []
-        self.diff_failures = []
+        self.failed_urls: List[Dict] = []
+        self.diff_failures: List[Dict] = []
 
-    def get_top_branches(self, project_key: str, repo_slug: str, start_date: str, end_date: str):
+    def get_top_branches(self, project_key: str, repo_slug: str, start_date: str, end_date: str) -> List[str]:
         branch_url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/branches?limit=1000"
         response, err = self.api.make_request(branch_url)
         if not response:
@@ -215,9 +232,9 @@ class CommitProcessor:
         self.logger.debug(f"Top {self.recent_branches} branches for {project_key}/{repo_slug}: {result}")
         return result
 
-    def process_commits_spk(self, project_key: str, repo_slug: str, start_date: str, end_date: str):
+    def process_commits_spk(self, project_key: str, repo_slug: str, start_date: str, end_date: str) -> List[Dict]:
         top_branches = self.get_top_branches(project_key, repo_slug, start_date, end_date)
-        deduped_commits = {}
+        deduped_commits: Dict[str, dict] = {}
         for branch in top_branches:
             url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits?limit=1000&until={branch}"
             response, error_reason = self.api.make_request(url)
@@ -234,7 +251,7 @@ class CommitProcessor:
                 commit_id = commit.get('id', '')
                 if commit_id not in deduped_commits:
                     deduped_commits[commit_id] = commit
-        output_rows = []
+        output_rows: List[Dict] = []
         for commit in deduped_commits.values():
             commit_date = datetime.fromtimestamp(commit["authorTimestamp"] / 1000)
             commit_month = commit_date.strftime('%Y-%m')
@@ -246,7 +263,7 @@ class CommitProcessor:
             if self.author_email_filter and author_email not in self.author_email_filter:
                 continue
             commit_id = commit.get('id', '')
-            row = {
+            row: Dict[str, str] = {
                 "Project Key": project_key,
                 "Repo Slug": repo_slug,
                 "Author Name": author_name,
@@ -258,11 +275,11 @@ class CommitProcessor:
             output_rows.append(row)
         return output_rows
 
-    def process_commits_by_ids(self, commit_id_file: str):
+    def process_commits_by_ids(self, commit_id_file: str) -> List[Dict]:
         df = pd.read_excel(commit_id_file)
         processed_commits = load_processed_commit_ids(self.output_folder)
         df = df[~df["COMMIT_ID"].isin(processed_commits)]
-        output_rows = []
+        output_rows: List[Dict] = []
         for index, row in df.iterrows():
             commit_type = row.get("COMMIT_TYPE", "").lower()
             commit_id = row["COMMIT_ID"]
@@ -310,7 +327,7 @@ class CommitProcessor:
                     "severity": "error"
                 })
                 continue
-            commit_month = "Unknown"
+            commit_month = "Unknown"  # No timestamp available in commit_ids.xlsx.
             first_row = True
             if 'diffs' not in diff_data or not diff_data['diffs']:
                 self.diff_failures.append({
@@ -370,19 +387,26 @@ class CommitProcessor:
                 first_row = False
         return output_rows
 
-    def write_chunk(self, rows: list, chunk_index: int, filename_prefix=None):
+    def write_chunk(self, rows: List[Dict], chunk_index: int, filename_prefix: Optional[str] = None) -> None:
+        # Sanitize rows to convert any map objects to lists.
+        rows = sanitize_rows(rows)
         if rows:
             df = pd.DataFrame(rows)
             if filename_prefix:
                 output_path = os.path.join(self.output_folder, f"{filename_prefix}.parquet")
             else:
                 output_path = os.path.join(self.output_folder, f"commit_file_output_part_{chunk_index}.parquet")
+            # Append timestamp if file exists.
+            if os.path.exists(output_path):
+                base, ext = os.path.splitext(output_path)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_path = f"{base}_{timestamp}{ext}"
             df.to_parquet(output_path, engine="pyarrow", index=False)
             self.logger.info(f"Output written with {len(rows)} rows to {output_path}")
         else:
             self.logger.info(f"No rows to write for chunk {chunk_index}.")
 
-    def write_failure_files(self):
+    def write_failure_files(self) -> None:
         if self.failed_urls:
             df_failed = pd.DataFrame(self.failed_urls)
             failed_path = os.path.join(self.output_folder, "failed_urls.parquet")
@@ -397,7 +421,7 @@ class CommitProcessor:
 # ------------------------------
 # Main Processing Functions for SPK Mode (Commit Collector)
 # ------------------------------
-def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end_date: str, recent_branches: int, order: str):
+def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end_date: str, recent_branches: int, order: str) -> None:
     project_keys_file = os.path.join(input_folder, 'WTMSPK.xlsx')
     filter_file = os.path.join(input_folder, 'author_filter.xlsx')
     wb = load_workbook(project_keys_file)
@@ -414,13 +438,13 @@ def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end
     BITBUCKET_BASE_URL = os.getenv('BITBUCKET_BASE_URL', 'https://scm.horizon.bankofamerica.com/rest/api/latest')
     BITBUCKET_USERNAME = os.getenv('BITBUCKET_USERNAME', '')
     BITBUCKET_APP_PASSWORD = os.getenv('BITBUCKET_APP_PASSWORD', '')
-    token_bucket = TokenBucket(capacity=70, tokens_per_second=1)
+    token_bucket = TokenBucket(capacity=75, tokens_per_second=5)
     api = BitbucketAPI(BITBUCKET_BASE_URL, BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD, token_bucket)
     processor = CommitProcessor(api, output_folder, author_email_filter, recent_branches=recent_branches)
 
     successful_repos = 0
     total_repos = 0
-    futures = {}
+    futures: Dict[str, any] = {}
     with ThreadPoolExecutor(max_workers=5) as executor:
         for row in spk_rows:
             project_key = row[0]
@@ -445,10 +469,10 @@ def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end
     main_logger.info(f"Total tokens consumed: {token_bucket.calls_made}")
     main_logger.info(f"Remaining token capacity: {token_bucket.tokens}")
 
-def process_project(project_key: str, processor: CommitProcessor, start_date: str, end_date: str):
+def process_project(project_key: str, processor: CommitProcessor, start_date: str, end_date: str) -> Tuple[str, List[Tuple[str, List[Dict]]]]:
     BITBUCKET_BASE_URL = os.getenv('BITBUCKET_BASE_URL', 'https://scm.horizon.bankofamerica.com/rest/api/latest')
     api = processor.api
-    repo_outputs = []  # List of tuples: (repo_slug, output_rows)
+    repo_outputs: List[Tuple[str, List[Dict]]] = []
     repos_url = f"{BITBUCKET_BASE_URL}/projects/{project_key}/repos?limit=1000"
     response, error_reason = api.make_request(repos_url)
     if not response:
@@ -471,16 +495,15 @@ def process_project(project_key: str, processor: CommitProcessor, start_date: st
 # ------------------------------
 # Main Processing Functions for Commit Mode (API-Only)
 # ------------------------------
-def process_commit_mode(input_folder: str, output_folder: str, chunk_size: int = 10000):
+def process_commit_mode(input_folder: str, output_folder: str, chunk_size: int = 1000) -> None:
     commit_id_file = os.path.join(input_folder, 'commit_ids.xlsx')
     df = pd.read_excel(commit_id_file)
-    # Load existing commit IDs from output files.
     processed_commits = load_processed_commit_ids(output_folder)
     df = df[~df["COMMIT_ID"].isin(processed_commits)]
     total_commits = len(df)
     main_logger.info(f"Total commit IDs to process: {total_commits}")
     
-    token_bucket = TokenBucket(capacity=70, tokens_per_second=1)
+    token_bucket = TokenBucket(capacity=75, tokens_per_second=5)
     BITBUCKET_BASE_URL = os.getenv('BITBUCKET_BASE_URL', 'https://scm.horizon.bankofamerica.com/rest/api/latest')
     BITBUCKET_USERNAME = os.getenv('BITBUCKET_USERNAME', '')
     BITBUCKET_APP_PASSWORD = os.getenv('BITBUCKET_APP_PASSWORD', '')
@@ -490,7 +513,7 @@ def process_commit_mode(input_folder: str, output_folder: str, chunk_size: int =
     processed_commit_count = 0
     count_lock = threading.Lock()
     
-    def process_chunk(chunk_df, chunk_index):
+    def process_chunk(chunk_df: pd.DataFrame, chunk_index: int) -> None:
         nonlocal processed_commit_count
         rows = process_commit_chunk(processor, chunk_df)
         filename = f"commit_output_part_{chunk_index}"
@@ -499,15 +522,13 @@ def process_commit_mode(input_folder: str, output_folder: str, chunk_size: int =
             processed_commit_count += len(chunk_df)
             current = processed_commit_count
         main_logger.info(f"Processed {current} out of {total_commits} commit IDs (Chunk {chunk_index}: Output file: {filename}.parquet)")
-        # Log active parallel tasks.
-        active = threading.active_count()
-        main_logger.info(f"Currently, {active} threads are active.")
+        main_logger.info(f"Currently, {threading.active_count()} threads are active.")
     
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = []
         for i in range(0, total_commits, chunk_size):
             chunk_df = df.iloc[i:i+chunk_size]
-            futures.append(executor.submit(process_chunk, chunk_df, i//chunk_size + 1))
+            futures.append(executor.submit(process_chunk, chunk_df, i // chunk_size + 1))
         for future in as_completed(futures):
             future.result()
     
@@ -515,14 +536,13 @@ def process_commit_mode(input_folder: str, output_folder: str, chunk_size: int =
     main_logger.info(f"Total tokens consumed: {token_bucket.calls_made}")
     main_logger.info(f"Remaining token capacity: {token_bucket.tokens}")
 
-def process_commit_chunk(processor: 'CommitProcessor', chunk_df: pd.DataFrame):
-    output_rows = []
+def process_commit_chunk(processor: CommitProcessor, chunk_df: pd.DataFrame) -> List[Dict]:
+    output_rows: List[Dict] = []
     for index, row in chunk_df.iterrows():
         commit_type = row.get("COMMIT_TYPE", "").lower()
         commit_id = row["COMMIT_ID"]
         project_key = row["SPK"]
         repo_slug = row["REPOSITORY_NAME"]
-        # If commit type is merge, output a row with zero changes.
         if commit_type == "merge":
             author_name = row.get("FULL_NAME", "Unknown")
             author_email = row.get("EMAIL_ID", "Unknown").lower()
@@ -565,7 +585,7 @@ def process_commit_chunk(processor: 'CommitProcessor', chunk_df: pd.DataFrame):
                 "severity": "error"
             })
             continue
-        commit_month = "Unknown"  # Timestamp not available in commit_ids.xlsx
+        commit_month = "Unknown"  # Timestamp not available in commit_ids.xlsx.
         first_row = True
         if 'diffs' not in diff_data or not diff_data['diffs']:
             processor.diff_failures.append({
@@ -628,7 +648,7 @@ def process_commit_chunk(processor: 'CommitProcessor', chunk_df: pd.DataFrame):
 # ------------------------------
 # Main Entry Point with Argument Parsing
 # ------------------------------
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Process Bitbucket commits (API-only).")
     parser.add_argument('--mode', choices=['spk', 'commit'], default='commit',
                         help="Input mode: 'spk' for SPK list mode, 'commit' for commit id mode. (Default: commit)")
@@ -640,8 +660,8 @@ def main():
                         help="Number of recent branches to process in SPK mode (default: 5).")
     parser.add_argument('--order', choices=['top-down', 'bottom-up'], default='top-down',
                         help="Processing order for SPKs (top-down or bottom-up).")
-    parser.add_argument('--commit_chunk_size', type=int, default=10000,
-                        help="Chunk size for processing commit mode (default: 10000).")
+    parser.add_argument('--commit_chunk_size', type=int, default=1000,
+                        help="Chunk size for processing commit mode (default: 1000).")
     args = parser.parse_args()
 
     common_folder = "C:/Riskportal/3Mar2025_JavaTrainings"
@@ -669,4 +689,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-###
