@@ -1,0 +1,417 @@
+import logging
+from collections import Counter
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import pandas as pd
+from pygments.lexers import guess_lexer_for_filename
+from pygments.util import ClassNotFound
+
+# Configuration Flags
+MERGE_FILES: bool = True  # now merging parquet files
+ENRICH_DATA: bool = True
+GENERATE_NON_CONTRIBUTION: bool = False
+GENERATE_CONTRIBUTION: bool = True
+GENERATE_AIT: bool = True
+GENERATE_TEAMS: bool = True
+GENERATE_MISC: bool = False
+GENERATE_ISKILL_DATA: bool = True
+GENERATE_TECHNOLOGY: bool = True
+USE_PARQUET: bool = True
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+
+# Define base folders using pathlib
+BASE_FOLDER = Path("C:/RiskPortal/13MarJavaTrainees")
+SOR_FOLDER = Path("C:/Riskportal/13MarJavaTrainees/Input")
+PARQUET_FOLDER = BASE_FOLDER / "Output"
+
+# File paths
+TEAM_MEMBERS_HQ_FILE = SOR_FOLDER / "Members"
+TEAM_HQ_FILE = SOR_FOLDER / "Teams"
+AIT_FILE = SOR_FOLDER / "app_detail"
+CI_FILE = SOR_FOLDER / "CI"
+ISKILL_FILE = SOR_FOLDER / "iskill"
+AUTHOR_FILTER_FILE = BASE_FOLDER / "input/author_filter.xlsx"
+
+FINAL_CONTRIBUTOR_FILE = BASE_FOLDER / "finaloutput_contributor.parquet"
+FINAL_NONCONTRIBUTOR_FILE = BASE_FOLDER / "finaloutput_noncontributor.parquet"
+
+# Mapping dictionaries for technology identification
+LANGUAGE_MAPPING = {
+    '.class': 'Java', '.java': 'Java', '.properties': 'Java',
+    '.sql': 'SQL', 'Jenkinsfile': 'CICD', '.wxs': 'Win Installer packages',
+    'web.config': 'ASP.NET', '.aspx': 'ASP.NET',
+    'csproj': '.NET Framework', '.dll': '.NET Framework',
+    'packages.config': '.NET Framework', '.cshtml': 'ASP.NET MVC',
+    '.dtsx': 'SSIS', '.yaml': 'YAML',
+    '.json': 'JSON', '.xml': 'XML',
+    'JSP': 'Java', 'trig': 'Turtle Resource Description Framework'
+}
+
+FRAMEWORK_MAPPING = {
+    'package.json': 'React / Vue / Angular',
+    'angular.json': 'Angular',
+    'app.py': 'Flask',
+    'pom.xml': 'Spring Boot',
+    'requirements.txt': 'Django/Flask',
+    'program.cs': '.NET Core',
+    'routes.rb': 'Ruby on Rails',
+    'routes.js': 'Express.js',
+    'app.js': 'Express.js'
+}
+
+
+def merge_parquet_files(folder: Path) -> pd.DataFrame:
+    """
+    Merge Parquet files from the provided folder.
+    """
+    try:
+        if not MERGE_FILES:
+            merged_path = BASE_FOLDER / "output.xlsx"
+            logging.info("Loading merged file from %s", merged_path)
+            return pd.read_excel(merged_path)
+
+        all_data = []
+        file_count = 0
+        for file in folder.iterdir():
+            if file.suffix.lower() == ".parquet":
+                try:
+                    df = pd.read_parquet(file, engine='pyarrow')
+                    file_count += 1
+                    all_data.append(df)
+                except Exception as e:
+                    logging.error("Error reading file %s: %s", file, e)
+        logging.info("Processed %s Parquet files.", file_count)
+        merged_data = pd.concat(all_data, ignore_index=True)
+        if 'Month Lines Modified' in merged_data.columns:
+            merged_data.drop(columns=['Month Lines Modified'], inplace=True)
+        return merged_data
+    except Exception as e:
+        logging.exception("Failed during Parquet merging: %s", e)
+        raise
+
+
+def handle_iskill_data(merged_data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Enrich merged_data with iSkill data.
+    """
+    if not GENERATE_ISKILL_DATA:
+        return merged_data
+
+    try:
+        iskill_path = ISKILL_FILE.with_suffix(".parquet") if USE_PARQUET else ISKILL_FILE.with_suffix(".xlsx")
+        logging.info("Loading iSkill data from %s", iskill_path)
+        iskill_data = pd.read_parquet(iskill_path, engine='pyarrow') if USE_PARQUET else pd.read_excel(iskill_path)
+    except Exception as e:
+        logging.error("Error loading iSkill data: %s", e)
+        return merged_data
+
+    iskill_df = iskill_data[iskill_data['SkillType'] == 'Technology']
+    try:
+        result = iskill_df.groupby(
+            ["EmployeeEmailID", "DeliveryLeader", "DeliveryHead", "GDL"]
+        ).apply(lambda group: group[
+            ['SkillName', 'SkillCategory', 'SkillClassification', 'SkillProficiency',
+             'CurrentJobUsage', 'YearLastUsed', 'YearsOfExperience']
+        ].to_dict(orient='records')).reset_index(name="ISkill")
+    except Exception as e:
+        logging.error("Error processing iSkill groupby: %s", e)
+        return merged_data
+
+    merged_data = merged_data.merge(
+        result,
+        left_on='Author Email', right_on='EmployeeEmailID',
+        how='left'
+    )
+    merged_data.drop(columns=['EmployeeEmailID'], inplace=True)
+    return merged_data
+
+
+def enrich_ait_data(merged_data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Enrich merged_data with AIT details.
+    """
+    if not GENERATE_AIT:
+        return merged_data
+
+    try:
+        ci_path = CI_FILE.with_suffix(".parquet") if USE_PARQUET else CI_FILE.with_suffix(".xlsx")
+        logging.info("Loading CI data from %s", ci_path)
+        ci_data = pd.read_parquet(ci_path, engine='pyarrow') if USE_PARQUET else pd.read_excel(ci_path)
+    except Exception as e:
+        logging.error("Error loading CI data: %s", e)
+        return merged_data
+
+    try:
+        ait_path = AIT_FILE.with_suffix(".parquet") if USE_PARQUET else AIT_FILE.with_suffix(".xlsx")
+        logging.info("Loading AIT data from %s", ait_path)
+        ait_data = pd.read_parquet(ait_path, engine='pyarrow') if USE_PARQUET else pd.read_excel(ait_path)
+    except Exception as e:
+        logging.error("Error loading AIT data: %s", e)
+        return merged_data
+
+    merged_data = merged_data.merge(
+        ci_data[['SPK', 'AIT']],
+        left_on='Project Key',
+        right_on='SPK',
+        how='left'
+    )
+
+    if 'AIT_y' in merged_data.columns:
+        merged_data['AIT'] = merged_data['AIT_y']
+        merged_data.drop(columns=['AIT_y'], inplace=True)
+
+    merged_data = merged_data.merge(
+        ait_data[['AIT', 'AppName', 'TechExec1Down', 'AppMgr', 'TechExec']],
+        on='AIT',
+        how='left'
+    )
+
+    for col in ['AppName', 'TechExec1Down', 'AppMgr', 'TechExec']:
+        merged_data[col] = merged_data[col].fillna('NA')
+
+    return merged_data
+
+
+def enrich_team_data(merged_data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Enrich merged_data with team member and team details.
+    """
+    try:
+        team_members_path = TEAM_MEMBERS_HQ_FILE.with_suffix(".parquet") if USE_PARQUET else TEAM_MEMBERS_HQ_FILE.with_suffix(".xlsx")
+        team_path = TEAM_HQ_FILE.with_suffix(".parquet") if USE_PARQUET else TEAM_HQ_FILE.with_suffix(".xlsx")
+        logging.info("Loading team member data from %s and team data from %s", team_members_path, team_path)
+        team_members_data = pd.read_parquet(team_members_path, engine='pyarrow') if USE_PARQUET else pd.read_excel(team_members_path)
+        team_data = pd.read_parquet(team_path, engine='pyarrow') if USE_PARQUET else pd.read_excel(team_path)
+    except Exception as e:
+        logging.error("Error loading team data: %s", e)
+        return merged_data
+
+    team_members_grouped = (
+        team_members_data
+        .groupby("Email Address")
+        .agg({
+            "HR Role": "first",
+            "Team Member City": "first",
+            "ID": "first",
+            "Name": lambda x: ", ".join(x)
+        })
+        .reset_index()
+    )
+    team_members_grouped.rename(columns={'Email Address': 'Author Email'}, inplace=True)
+    merged_data = merged_data.merge(
+        team_members_grouped[['ID', 'Name', 'Team Member City', 'HR Role', 'Author Email']],
+        on="Author Email",
+        how="left"
+    )
+
+    if 'Team' in merged_data.columns:
+        merged_data['Team'] = merged_data['Team'].fillna('NA').astype(str)
+        merged_data.rename(columns={'HR Role': 'Author Role'}, inplace=True)
+        merged_data.rename(columns={'Name': 'Team'}, inplace=True)
+
+    merged_data = merged_data.merge(
+        team_data[['ID', 'CIO ID', 'CIO-1 ID', 'CIO-2 ID']],
+        on='ID',
+        how='left'
+    )
+
+    for col in ['CIO ID', 'CIO-1 ID', 'CIO-2 ID']:
+        merged_data[col] = merged_data[col].fillna('NA').astype(str)
+    merged_data['ID'] = merged_data['ID'].fillna('0').astype(str)
+
+    merged_data.rename(columns={
+        'CIO ID': 'CIONBKID',
+        'CIO-1 ID': 'CIO1NBKID',
+        'CIO-2 ID': 'CIO2NBKID',
+        'ID': 'TEAMID'
+    }, inplace=True)
+
+    return merged_data
+
+
+def enrich_misc_data(merged_data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Enrich merged_data with miscellaneous details like Reporting Manager and employee role/type.
+    """
+    if not GENERATE_MISC:
+        return merged_data
+
+    try:
+        author_filter_data = pd.read_excel(AUTHOR_FILTER_FILE)
+    except Exception as e:
+        logging.error("Error loading author filter data: %s", e)
+        return merged_data
+
+    merged_data = merged_data.merge(
+        author_filter_data[['Author Email', 'Reporting Manager']],
+        on='Author Email',
+        how='left'
+    )
+    if 'Reporting Manager' in merged_data.columns:
+        merged_data['Reporting Manager'] = merged_data['Reporting Manager'].fillna('NA').astype(str)
+    merged_data['empType'] = merged_data.apply(get_emp_type, axis=1)
+    merged_data['empRole'] = merged_data.apply(get_emp_role, axis=1)
+    return merged_data
+
+
+def get_emp_type(row: pd.Series) -> str:
+    """
+    Determine employee type based on HR role and team city.
+    """
+    hr_role = str(row.get('Author Role', '')).lower()
+    team_city = str(row.get('Team Member City', '')).lower()
+    if any(x in hr_role for x in ['apprentice', 'gbs', '- r', '- regulated']):
+        return 'GBS'
+    elif 'india' in team_city:
+        return 'SP India'
+    else:
+        return 'Onsite Associate'
+
+
+def get_emp_role(row: pd.Series) -> str:
+    """
+    Determine employee role based on HR role.
+    """
+    hr_role = str(row.get('Author Role', '')).lower()
+    if 'quality' in hr_role:
+        return 'QA'
+    elif 'feature' in hr_role:
+        return 'FL'
+    elif 'arch' in hr_role:
+        return 'Arch'
+    elif any(x in hr_role for x in ['analyst', 'apprentice', 'contractor', 'engineer']):
+        return 'Dev'
+    else:
+        return 'Others'
+
+
+def enrich_data(merged_data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Main enrichment function that sequentially applies various enrichment steps.
+    """
+    if not ENRICH_DATA:
+        return merged_data
+
+    try:
+        logging.info("Enriching with AIT details.")
+        merged_data = enrich_ait_data(merged_data)
+        logging.info("Enriching with team details.")
+        merged_data = enrich_team_data(merged_data)
+        logging.info("Enriching with miscellaneous details.")
+        merged_data = enrich_misc_data(merged_data)
+        logging.info("Enriching with iSkill data.")
+        merged_data = handle_iskill_data(merged_data)
+    except Exception as e:
+        logging.exception("Error during data enrichment: %s", e)
+    return merged_data
+
+
+def generate_noncontributor(author_filter: Path, merged_data: pd.DataFrame) -> None:
+    """
+    Generate non-contributor report by comparing a list of all authors with those who contributed.
+    The output is saved as a Parquet file.
+    """
+    if not GENERATE_NON_CONTRIBUTION:
+        return
+
+    try:
+        logging.info("Processing non-contributors.")
+        author_filter_data = pd.read_excel(author_filter)
+        contributed_emails = merged_data['Author Email'].dropna().unique()
+        noncontributor_data = author_filter_data[~author_filter_data['Author Email'].isin(contributed_emails)]
+        noncontributor_data.loc[:, 'AIT'] = 0
+        noncontributor_data.loc[:, 'Team'] = "NA"
+        noncontributor_data = enrich_data(noncontributor_data)
+        noncontributor_data.to_parquet(FINAL_NONCONTRIBUTOR_FILE, index=False, engine='pyarrow')
+        logging.info("Non-contributor report generated at %s", FINAL_NONCONTRIBUTOR_FILE)
+    except Exception as e:
+        logging.error("Error generating non-contributor report: %s", e)
+
+
+def get_file_extension(file_name: str) -> str:
+    """
+    Get file extension from a file name.
+    """
+    parts = file_name.split('.')
+    if len(parts) > 1:
+        return '.' + parts[-1].lower()
+    return file_name.lower()
+
+
+def get_technology_for_file(file_name: Optional[str]) -> str:
+    """
+    Determine technology (programming language) based on file name or extension.
+    """
+    if file_name and isinstance(file_name, str):
+        file_extension = get_file_extension(file_name)
+        if file_extension in LANGUAGE_MAPPING:
+            return LANGUAGE_MAPPING[file_extension]
+        if file_name in LANGUAGE_MAPPING:
+            return LANGUAGE_MAPPING[file_name]
+        try:
+            lexer = guess_lexer_for_filename(file_name, '')
+            return lexer.name
+        except ClassNotFound:
+            return 'TBC'
+    return 'TBC'
+
+
+def process_technology(enriched_data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Process each repository to assign primary language and likely framework.
+    """
+    enriched_data["File Extension"] = enriched_data["File Name"].apply(
+        lambda x: x.split('.')[-1] if '.' in x else "unknown"
+    )
+    repo_language: Dict[Any, str] = {}
+    repo_framework: Dict[Any, str] = {}
+
+    for repo, group in enriched_data.groupby(["Project Key", "Repo Slug"]):
+        file_extensions = group["File Extension"].tolist()
+        extension_counts = Counter(file_extensions)
+        most_common_ext = max(extension_counts, key=extension_counts.get)
+        primary_language = LANGUAGE_MAPPING.get(f".{most_common_ext}", "TBC")
+        framework_found = {FRAMEWORK_MAPPING[file] for file in group["File Name"] if file in FRAMEWORK_MAPPING}
+        likely_framework = ", ".join(framework_found) if framework_found else "TBC"
+        repo_language[repo] = primary_language
+        repo_framework[repo] = likely_framework
+
+    enriched_data["Technology"] = enriched_data.apply(
+        lambda row: repo_language.get((row["Project Key"], row["Repo Slug"]), "TBC"), axis=1
+    )
+    enriched_data["Likely Framework"] = enriched_data.apply(
+        lambda row: repo_framework.get((row["Project Key"], row["Repo Slug"]), "TBC"), axis=1
+    )
+
+    return enriched_data
+
+
+def main() -> None:
+    """
+    Main execution flow: merge, enrich, process technology, and output results.
+    """
+    try:
+        logging.info("Starting the data processing pipeline.")
+        merged_data = merge_parquet_files(PARQUET_FOLDER)
+        enriched_data = enrich_data(merged_data)
+        # Generate non-contributor report if enabled
+        generate_noncontributor(AUTHOR_FILTER_FILE, enriched_data)
+        enriched_data = process_technology(enriched_data)
+        # Re-apply iSkill enrichment if necessary
+        enriched_data = handle_iskill_data(enriched_data)
+        # Save the final enriched contributor output as a Parquet file
+        enriched_data.to_parquet(FINAL_CONTRIBUTOR_FILE, index=False, engine='pyarrow')
+        logging.info("Data processing complete. Contributor output saved to %s", FINAL_CONTRIBUTOR_FILE)
+    except Exception as e:
+        logging.exception("Error in main processing: %s", e)
+
+
+if __name__ == "__main__":
+    main()
