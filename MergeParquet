@@ -1,0 +1,38 @@
+import os
+import pandas as pd
+
+def merge_parquet_files(input_folder, output_file):
+    """
+    Merges all Parquet files in the specified folder into a single Parquet file.
+    
+    :param input_folder: Path to the folder containing Parquet files.
+    :param output_file: Path to the output merged Parquet file.
+    """
+    # List all Parquet files in the folder
+    parquet_files = [f for f in os.listdir(input_folder) if f.endswith('.parquet')]
+    
+    if not parquet_files:
+        print("No Parquet files found in the specified folder.")
+        return
+    
+    # Read and merge all Parquet files
+    dataframes = []
+    for file in parquet_files:
+        file_path = os.path.join(input_folder, file)
+        df = pd.read_parquet(file_path)
+        dataframes.append(df)
+        print(f"Loaded {file} with {len(df)} rows.")
+    
+    # Concatenate all dataframes
+    merged_df = pd.concat(dataframes, ignore_index=True)
+    
+    # Save merged dataframe to a new Parquet file
+    merged_df.to_parquet(output_file, engine='pyarrow', index=False)
+    
+    print(f"Successfully merged {len(parquet_files)} files into {output_file} with {len(merged_df)} total rows.")
+
+# Example usage
+input_folder = "path/to/your/parquet/folder"  # Change this to your folder path
+output_file = "merged_output.parquet"  # Change this to your desired output file name
+
+merge_parquet_files(input_folder, output_file)
