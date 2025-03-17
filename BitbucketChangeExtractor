@@ -1,4 +1,3 @@
-#
 import re
 import threading
 import logging
@@ -13,6 +12,14 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openpyxl import load_workbook
 from requests.adapters import HTTPAdapter
+
+# Suppress insecure request warnings.
+requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
+
+# Suppress logs from urllib3.
+logging.getLogger("urllib3").setLevel(logging.CRITICAL)
+# Raise CommitProcessor logging level so only warnings and above are logged.
+logging.getLogger("CommitProcessor").setLevel(logging.WARNING)
 
 # ------------------------------
 # Custom JSON Logging Formatter
@@ -31,7 +38,7 @@ class JsonFormatter(logging.Formatter):
             log_record["severity"] = record.severity
         return json.dumps(log_record)
 
-# Setup logging: logs to console and to a file in the output folder.
+# Setup logging: logs to console and file.
 def configure_logging(output_folder):
     output_log_path = os.path.join(output_folder, "process_log.txt")
     console_handler = logging.StreamHandler()
@@ -44,21 +51,20 @@ def configure_logging(output_folder):
 main_logger = None  # Will be set in main().
 
 # ------------------------------
-# Utility: Read Already-Processed Commit IDs from Existing Parquet Files
+# Utility: Load processed commit IDs from existing Parquet files.
 # ------------------------------
 def load_processed_commit_ids(output_folder):
-    processed_commits = set()
+    processed = set()
     for file in glob.glob(os.path.join(output_folder, "commit_output_part_*.parquet")):
         try:
             df_existing = pd.read_parquet(file, engine="pyarrow")
-            # Check for either column name; we assume commit IDs are in column "COMMIT_ID" or "Commit Id"
             if "COMMIT_ID" in df_existing.columns:
-                processed_commits.update(df_existing["COMMIT_ID"].unique())
+                processed.update(df_existing["COMMIT_ID"].unique())
             elif "Commit Id" in df_existing.columns:
-                processed_commits.update(df_existing["Commit Id"].unique())
+                processed.update(df_existing["Commit Id"].unique())
         except Exception as e:
             main_logger.error(f"Error reading {file}: {e}")
-    return processed_commits
+    return processed
 
 # ------------------------------
 # Token Bucket for Rate Limiting
@@ -88,7 +94,7 @@ class TokenBucket:
             time.sleep(0.1)
 
 # ------------------------------
-# Bitbucket API Wrapper with Connection Pool Increase
+# Bitbucket API Wrapper with Increased Connection Pool
 # ------------------------------
 class BitbucketAPI:
     def __init__(self, base_url: str, username: str, app_password: str, token_bucket: TokenBucket):
@@ -117,7 +123,7 @@ class BitbucketAPI:
                 error_message = str(e)
                 status_code = response.status_code if response is not None else "N/A"
                 if response is not None and response.status_code == 429:
-                    self.logger.critical(f"429 Too Many Requests encountered for {url}!", 
+                    self.logger.critical(f"429 Too Many Requests encountered for {url}!",
                                            extra={"error_category": "Rate Limit", "severity": "critical"})
                 extra = {"error_category": "API Failure", "severity": "error"}
                 self.logger.error(f"Request failed for {url}: {error_message} (Status: {status_code})", extra=extra)
@@ -141,7 +147,7 @@ class BitbucketAPI:
 def parse_diff_change(change: dict) -> (int, int, int):
     lines_added = 0
     lines_removed = 0
-    lines_modified = 0  # Not provided separately by the API
+    lines_modified = 0
     try:
         for hunk in change.get('hunks', []):
             for segment in hunk.get('segments', []):
@@ -157,7 +163,7 @@ def parse_diff_change(change: dict) -> (int, int, int):
     return lines_added, lines_removed, lines_modified
 
 # ------------------------------
-# Commit Processor: API-Only for SPK Mode (Commit Collector)
+# Commit Processor: API-Only Approach for SPK Mode (Commit Collector)
 # ------------------------------
 class CommitProcessor:
     def __init__(self, api: BitbucketAPI, output_folder: str, author_email_filter: set = None, recent_branches: int = 5):
@@ -253,16 +259,35 @@ class CommitProcessor:
         return output_rows
 
     def process_commits_by_ids(self, commit_id_file: str):
-        # Read commit_ids.xlsx; expect columns: COMMIT_ID, REPOSITORY_NAME, SPK, EMAIL_ID, FULL_NAME.
         df = pd.read_excel(commit_id_file)
-        # Read existing commit IDs from previously produced output files.
-        existing_commits = load_processed_commit_ids(self.output_folder)
-        df = df[~df["COMMIT_ID"].isin(existing_commits)]
+        processed_commits = load_processed_commit_ids(self.output_folder)
+        df = df[~df["COMMIT_ID"].isin(processed_commits)]
         output_rows = []
         for index, row in df.iterrows():
+            commit_type = row.get("COMMIT_TYPE", "").lower()
             commit_id = row["COMMIT_ID"]
             project_key = row["SPK"]
             repo_slug = row["REPOSITORY_NAME"]
+            if commit_type == "merge":
+                author_name = row.get("FULL_NAME", "Unknown")
+                author_email = row.get("EMAIL_ID", "Unknown").lower()
+                out_row = {
+                    "Project Key": project_key,
+                    "Repo Slug": repo_slug,
+                    "Author Name": author_name,
+                    "Author Email": author_email,
+                    "Commit Month": "Unknown",
+                    "Commit Id": commit_id,
+                    "File Name": "merge_commit",
+                    "Month Lines Added": 0,
+                    "Month Lines Removed": 0,
+                    "Month Lines Modified": 0,
+                    "Total Commits": 1,
+                    "File Status": "merge"
+                }
+                output_rows.append(out_row)
+                continue
+
             self.logger.debug(f"Processing commit {commit_id} in {project_key}/{repo_slug} (API mode)")
             diff_url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits/{commit_id}/diff?ignore_whitespace=true"
             file_response, diff_error = self.api.make_request(diff_url)
@@ -285,7 +310,7 @@ class CommitProcessor:
                     "severity": "error"
                 })
                 continue
-            commit_month = "Unknown"  # Timestamp not available in commit_ids.xlsx
+            commit_month = "Unknown"
             first_row = True
             if 'diffs' not in diff_data or not diff_data['diffs']:
                 self.diff_failures.append({
@@ -448,9 +473,8 @@ def process_project(project_key: str, processor: CommitProcessor, start_date: st
 # ------------------------------
 def process_commit_mode(input_folder: str, output_folder: str, chunk_size: int = 10000):
     commit_id_file = os.path.join(input_folder, 'commit_ids.xlsx')
-    # Load commit_ids.xlsx
     df = pd.read_excel(commit_id_file)
-    # Read existing commit IDs from existing output files.
+    # Load existing commit IDs from output files.
     processed_commits = load_processed_commit_ids(output_folder)
     df = df[~df["COMMIT_ID"].isin(processed_commits)]
     total_commits = len(df)
@@ -463,12 +487,21 @@ def process_commit_mode(input_folder: str, output_folder: str, chunk_size: int =
     api = BitbucketAPI(BITBUCKET_BASE_URL, BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD, token_bucket)
     processor = CommitProcessor(api, output_folder)
     
+    processed_commit_count = 0
+    count_lock = threading.Lock()
+    
     def process_chunk(chunk_df, chunk_index):
+        nonlocal processed_commit_count
         rows = process_commit_chunk(processor, chunk_df)
         filename = f"commit_output_part_{chunk_index}"
         processor.write_chunk(rows, chunk_index, filename_prefix=filename)
-        processed_count = min(chunk_index * chunk_size, total_commits)
-        main_logger.info(f"Processed {processed_count} out of {total_commits} commit IDs (Chunk {chunk_index}: Output file: {filename}.parquet)")
+        with count_lock:
+            processed_commit_count += len(chunk_df)
+            current = processed_commit_count
+        main_logger.info(f"Processed {current} out of {total_commits} commit IDs (Chunk {chunk_index}: Output file: {filename}.parquet)")
+        # Log active parallel tasks.
+        active = threading.active_count()
+        main_logger.info(f"Currently, {active} threads are active.")
     
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = []
@@ -485,9 +518,31 @@ def process_commit_mode(input_folder: str, output_folder: str, chunk_size: int =
 def process_commit_chunk(processor: 'CommitProcessor', chunk_df: pd.DataFrame):
     output_rows = []
     for index, row in chunk_df.iterrows():
+        commit_type = row.get("COMMIT_TYPE", "").lower()
         commit_id = row["COMMIT_ID"]
         project_key = row["SPK"]
         repo_slug = row["REPOSITORY_NAME"]
+        # If commit type is merge, output a row with zero changes.
+        if commit_type == "merge":
+            author_name = row.get("FULL_NAME", "Unknown")
+            author_email = row.get("EMAIL_ID", "Unknown").lower()
+            out_row = {
+                "Project Key": project_key,
+                "Repo Slug": repo_slug,
+                "Author Name": author_name,
+                "Author Email": author_email,
+                "Commit Month": "Unknown",
+                "Commit Id": commit_id,
+                "File Name": "merge_commit",
+                "Month Lines Added": 0,
+                "Month Lines Removed": 0,
+                "Month Lines Modified": 0,
+                "Total Commits": 1,
+                "File Status": "merge"
+            }
+            output_rows.append(out_row)
+            continue
+
         processor.logger.debug(f"Processing commit {commit_id} in {project_key}/{repo_slug} (API mode)")
         diff_url = f"{processor.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits/{commit_id}/diff?ignore_whitespace=true"
         file_response, diff_error = processor.api.make_request(diff_url)
@@ -510,7 +565,7 @@ def process_commit_chunk(processor: 'CommitProcessor', chunk_df: pd.DataFrame):
                 "severity": "error"
             })
             continue
-        commit_month = "Unknown"  # Timestamp not provided in commit_ids.xlsx
+        commit_month = "Unknown"  # Timestamp not available in commit_ids.xlsx
         first_row = True
         if 'diffs' not in diff_data or not diff_data['diffs']:
             processor.diff_failures.append({
@@ -593,7 +648,7 @@ def main():
     input_folder = os.path.join(common_folder, "input")
     output_folder = os.path.join(common_folder, "output")
     
-    # Configure logging in the output folder.
+    # Configure logging to write process_log.txt in the output folder.
     for handler in logging.getLogger().handlers[:]:
         logging.getLogger().removeHandler(handler)
     output_log_path = os.path.join(output_folder, "process_log.txt")
@@ -614,3 +669,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+###
