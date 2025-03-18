@@ -213,6 +213,7 @@ class CommitProcessor:
         output_rows: List[Dict] = []
         page = 0
         next_page: Optional[int] = None
+        # Process at most two pages.
         while page < 2:
             if next_page is not None:
                 url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits?limit=1000&start={next_page}&until={top_branch}"
@@ -229,7 +230,7 @@ class CommitProcessor:
                 break
             data = response.json()
             for commit in data.get("values", []):
-                # For merge commits, check if more than one parent.
+                # For merge commits, if more than one parent.
                 if len(commit.get("parents", [])) > 1:
                     author = commit.get("author", {})
                     author_name = author.get("displayName") or author.get("name") or "Unknown Author"
@@ -258,35 +259,64 @@ class CommitProcessor:
                     diff_url = f"{self.api.base_url}/projects/{project_key}/repos/{repo_slug}/commits/{commit_id}/diff?ignore_whitespace=true"
                     file_response, diff_error = self.api.make_request(diff_url)
                     if not file_response:
-                        self.failed_urls.append({
-                            "url": diff_url,
-                            "reason": diff_error,
-                            "error_category": "API Failure",
-                            "severity": "error"
-                        })
+                        row = {
+                            "Project Key": project_key,
+                            "Repo Slug": repo_slug,
+                            "Author Name": author_name,
+                            "Author Email": author_email,
+                            "Commit Month": commit_month,
+                            "Commit Id": commit_id,
+                            "File Name": "error",
+                            "Month Lines Added": 0,
+                            "Month Lines Removed": 0,
+                            "Month Lines Modified": 0,
+                            "Total Commits": 1,
+                            "File Status": "error"
+                        }
+                        output_rows.append(row)
                         continue
                     try:
                         diff_data = file_response.json()
                     except Exception as e:
-                        self.diff_failures.append({
-                            "url": diff_url,
-                            "commit_id": commit_id,
-                            "reason": str(e),
-                            "error_category": "Diff Parsing Failure",
-                            "severity": "error"
-                        })
+                        row = {
+                            "Project Key": project_key,
+                            "Repo Slug": repo_slug,
+                            "Author Name": author_name,
+                            "Author Email": author_email,
+                            "Commit Month": commit_month,
+                            "Commit Id": commit_id,
+                            "File Name": "error",
+                            "Month Lines Added": 0,
+                            "Month Lines Removed": 0,
+                            "Month Lines Modified": 0,
+                            "Total Commits": 1,
+                            "File Status": "error"
+                        }
+                        output_rows.append(row)
                         continue
-                    first_row = True
+                    if 'diffs' not in diff_data or not diff_data['diffs']:
+                        row = {
+                            "Project Key": project_key,
+                            "Repo Slug": repo_slug,
+                            "Author Name": author_name,
+                            "Author Email": author_email,
+                            "Commit Month": commit_month,
+                            "Commit Id": commit_id,
+                            "File Name": "",
+                            "Month Lines Added": 0,
+                            "Month Lines Removed": 0,
+                            "Month Lines Modified": 0,
+                            "Total Commits": 1,
+                            "File Status": "no_diff"
+                        }
+                        output_rows.append(row)
+                        continue
+                    # Aggregate all diff changes into one record.
+                    filenames = []
+                    total_added = 0
+                    total_removed = 0
+                    total_modified = 0
                     for change in diff_data.get("diffs", []):
-                        source_info = change.get("source", {})
-                        dest_info = change.get("destination", {})
-                        file_name = (dest_info.get("name") if dest_info and dest_info.get("name")
-                                     else source_info.get("name", "Unknown"))
-                        file_status = "modified"
-                        if not source_info:
-                            file_status = "new"
-                        elif not dest_info:
-                            file_status = "deleted"
                         try:
                             added, removed, modified = parse_diff_change(change)
                         except Exception as e:
@@ -298,22 +328,29 @@ class CommitProcessor:
                                 "severity": "error"
                             })
                             continue
-                        row = {
-                            "Project Key": project_key,
-                            "Repo Slug": repo_slug,
-                            "Author Name": author_name,
-                            "Author Email": author_email,
-                            "Commit Month": commit_month,
-                            "Commit Id": commit_id,
-                            "File Name": file_name,
-                            "Month Lines Added": added,
-                            "Month Lines Removed": removed,
-                            "Month Lines Modified": modified,
-                            "Total Commits": 1 if first_row else 0,
-                            "File Status": file_status
-                        }
-                        output_rows.append(row)
-                        first_row = False
+                        source_info = change.get("source", {})
+                        dest_info = change.get("destination", {})
+                        file_name = (dest_info.get("name") if dest_info and dest_info.get("name")
+                                     else source_info.get("name", "Unknown"))
+                        filenames.append(file_name)
+                        total_added += added
+                        total_removed += removed
+                        total_modified += modified
+                    aggregated_row = {
+                        "Project Key": project_key,
+                        "Repo Slug": repo_slug,
+                        "Author Name": author_name,
+                        "Author Email": author_email,
+                        "Commit Month": commit_month,
+                        "Commit Id": commit_id,
+                        "File Name": ",".join(filenames),
+                        "Month Lines Added": total_added,
+                        "Month Lines Removed": total_removed,
+                        "Month Lines Modified": total_modified,
+                        "Total Commits": 1,
+                        "File Status": "success"
+                    }
+                    output_rows.append(aggregated_row)
             next_page = data.get("nextPageStart")
             if not next_page:
                 break
@@ -379,7 +416,6 @@ def process_spk_mode(input_folder: str, output_folder: str, start_date: str, end
             project_key = row[0]
             if not project_key:
                 continue
-            # Process each project individually (repo-level check will be done later).
             futures[project_key] = executor.submit(process_project_spk, project_key, processor, start_date, end_date)
         for future in as_completed(futures):
             spk_progress += 1
@@ -408,7 +444,6 @@ def process_project_spk(project_key: str, processor: CommitProcessor, start_date
         repo_slug = repo.get('slug')
         if not repo_slug:
             continue
-        # Check if output file for this repo already exists.
         output_file = os.path.join(processor.output_folder, f"output_{project_key}_{repo_slug}.parquet")
         if os.path.exists(output_file):
             main_logger.info(f"Output for project {project_key} repo {repo_slug} exists; skipping.")
@@ -422,7 +457,7 @@ def process_project_spk(project_key: str, processor: CommitProcessor, start_date
 # ------------------------------
 def process_commit_mode(input_folder: str, output_folder: str, chunk_size: int = 1000) -> None:
     commit_id_file = os.path.join(input_folder, 'commit_ids.xlsx')
-    df = pd.read_excel(commit_id_file)
+    df = pd.read_excel(commit_id_file, dtype={"REPOSITORY_NAME": str})
     processed_commits = load_processed_commit_ids(output_folder)
     df = df[~df["COMMIT_ID"].isin(processed_commits)]
     total_commits = len(df)
@@ -467,11 +502,11 @@ def process_commit_chunk(processor: CommitProcessor, chunk_df: pd.DataFrame) -> 
         commit_type = row.get("COMMIT_TYPE", "").lower()
         commit_id = row["COMMIT_ID"]
         project_key = row["SPK"]
-        repo_slug = row["REPOSITORY_NAME"]
-        if "AUTHOR_TIMESTAMP" in row and pd.notna(row["AUTHOR_TIMESTAMP"]):
+        repo_slug = str(row["REPOSITORY_NAME"])
+        # Derive commit month from COMMIT_DATE (assumed to be a date)
+        if "COMMIT_DATE" in row and pd.notna(row["COMMIT_DATE"]):
             try:
-                commit_date = datetime.fromtimestamp(float(row["AUTHOR_TIMESTAMP"]) / 1000)
-                commit_month = commit_date.strftime("%Y-%m")
+                commit_month = pd.to_datetime(row["COMMIT_DATE"]).strftime("%Y-%m")
             except Exception:
                 commit_month = "Unknown"
         else:
@@ -506,7 +541,6 @@ def process_commit_chunk(processor: CommitProcessor, chunk_df: pd.DataFrame) -> 
                 "error_category": "API Failure",
                 "severity": "error"
             })
-            # If diff call fails, write row with 0 changes.
             out_row = {
                 "Project Key": project_key,
                 "Repo Slug": repo_slug,
@@ -514,12 +548,12 @@ def process_commit_chunk(processor: CommitProcessor, chunk_df: pd.DataFrame) -> 
                 "Author Email": row.get("EMAIL_ID", "Unknown").lower(),
                 "Commit Month": commit_month,
                 "Commit Id": commit_id,
-                "File Name": "",
+                "File Name": "error",
                 "Month Lines Added": 0,
                 "Month Lines Removed": 0,
                 "Month Lines Modified": 0,
                 "Total Commits": 1,
-                "File Status": "no_diff"
+                "File Status": "error"
             }
             output_rows.append(out_row)
             continue
@@ -534,7 +568,6 @@ def process_commit_chunk(processor: CommitProcessor, chunk_df: pd.DataFrame) -> 
                 "severity": "error"
             })
             continue
-        first_row = True
         if 'diffs' not in diff_data or not diff_data['diffs']:
             out_row = {
                 "Project Key": project_key,
@@ -552,26 +585,15 @@ def process_commit_chunk(processor: CommitProcessor, chunk_df: pd.DataFrame) -> 
             }
             output_rows.append(out_row)
             continue
+        # Aggregate file changes for the commit.
+        filenames = []
+        total_added = 0
+        total_removed = 0
+        total_modified = 0
+        first_row = True
         for change in diff_data.get("diffs", []):
-            source_info = change.get('source', {})
-            dest_info = change.get('destination', {})
-            file_name = (dest_info.get('name') if dest_info and dest_info.get('name')
-                         else source_info.get('name', 'Unknown'))
-            file_status = "modified"
-            if not source_info:
-                file_status = "new"
-            elif not dest_info:
-                file_status = "deleted"
             try:
                 added, removed, modified = parse_diff_change(change)
-                if added == 0 and removed == 0 and modified == 0 and file_status == "modified":
-                    processor.diff_failures.append({
-                        "url": diff_url,
-                        "commit_id": commit_id,
-                        "reason": "No changes found in diff",
-                        "error_category": "Diff Parsing Failure",
-                        "severity": "warning"
-                    })
             except Exception as e:
                 processor.diff_failures.append({
                     "url": diff_url,
@@ -581,22 +603,29 @@ def process_commit_chunk(processor: CommitProcessor, chunk_df: pd.DataFrame) -> 
                     "severity": "error"
                 })
                 continue
-            out_row = {
-                "Project Key": project_key,
-                "Repo Slug": repo_slug,
-                "Author Name": row.get("FULL_NAME", "Unknown"),
-                "Author Email": row.get("EMAIL_ID", "Unknown").lower(),
-                "Commit Month": commit_month,
-                "File Name": file_name,
-                "Month Lines Added": added,
-                "Month Lines Removed": removed,
-                "Month Lines Modified": modified,
-                "Total Commits": 1 if first_row else 0,
-                "Commit Id": commit_id,
-                "File Status": file_status
-            }
-            output_rows.append(out_row)
-            first_row = False
+            source_info = change.get("source", {})
+            dest_info = change.get("destination", {})
+            file_name = (dest_info.get("name") if dest_info and dest_info.get("name")
+                         else source_info.get("name", "Unknown"))
+            filenames.append(file_name)
+            total_added += added
+            total_removed += removed
+            total_modified += modified
+        aggregated_row = {
+            "Project Key": project_key,
+            "Repo Slug": repo_slug,
+            "Author Name": row.get("FULL_NAME", "Unknown"),
+            "Author Email": row.get("EMAIL_ID", "Unknown").lower(),
+            "Commit Month": commit_month,
+            "Commit Id": commit_id,
+            "File Name": ",".join(filenames),
+            "Month Lines Added": total_added,
+            "Month Lines Removed": total_removed,
+            "Month Lines Modified": total_modified,
+            "Total Commits": 1,
+            "File Status": "success"
+        }
+        output_rows.append(aggregated_row)
     return output_rows
 
 # ------------------------------
@@ -645,4 +674,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-# # #
+#ForGood
