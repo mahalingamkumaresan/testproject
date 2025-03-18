@@ -1,0 +1,10 @@
+spk_progress}/{total_spks})")
+            # Write output file for each repository.
+            for repo_slug, rows in repo_outputs:
+                if rows:
+                    filename = f"output_{proj_key}_{repo_slug}"
+                    processor.write_chunk(rows, 1, filename_prefix=filename)
+                    main_logger.info(f"Output file for project {proj_key} repo {repo_slug} written.")
+    processor.write_failure_files()
+    main_logger.info(f"Total tokens consumed: {token_bucket.calls_made}")
+    main_logger.info(f"Remaining token capacity: {token_bucket.tokens}")
