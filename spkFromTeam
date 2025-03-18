@@ -27,7 +27,6 @@ merged_df = pd.merge(team_ids_df, team_df, left_on='Team_ID', right_on='ID')
 
 # Function to extract unique values from comma-separated entries
 def get_unique_values(series):
-    # Split by comma and then get unique values
     unique_values = set()
     for entry in series.dropna():
         values = entry.split(',')
@@ -37,6 +36,13 @@ def get_unique_values(series):
 # Extract unique values from "Team Backlog" and "SPK" columns
 team_backlog_unique = get_unique_values(merged_df['Team Backlog'])
 spk_unique = get_unique_values(merged_df['SPK'])
+
+# Ensure both lists have the same length
+max_length = max(len(team_backlog_unique), len(spk_unique))
+
+# Pad the shorter list with empty strings to match the length
+team_backlog_unique.extend([""] * (max_length - len(team_backlog_unique)))
+spk_unique.extend([""] * (max_length - len(spk_unique)))
 
 # Create a DataFrame for the unique values
 unique_values_df = pd.DataFrame({
