@@ -1,10 +1,26 @@
+import os
 import pandas as pd
 
+# Define the path to the processing folder
+processing_folder = '/path/to/processing/folder'  # Replace this with the actual folder path
+
+# Define the file names for Team_IDs and the Parquet file
+team_ids_file = os.path.join(processing_folder, 'team_ids.xlsx')  # Excel file with Team_IDs
+team_parquet_file = os.path.join(processing_folder, 'team.parquet')  # Parquet file with team data
+
 # Load Team_IDs from Excel file
-team_ids_df = pd.read_excel('team_ids.xlsx')  # replace with your actual file
+team_ids_df = pd.read_excel(team_ids_file, engine='openpyxl')
 
 # Read the Parquet file
-team_df = pd.read_parquet('team.parquet')  # replace with your actual file
+team_df = pd.read_parquet(team_parquet_file)
+
+# Specify the necessary columns to merge from the team_df
+necessary_columns = ['ID', 'Team Backlog', 'SPK']  # Only these columns are needed
+team_df = team_df[necessary_columns]
+
+# Convert both Team_ID and ID to strings to ensure matching during merge
+team_ids_df['Team_ID'] = team_ids_df['Team_ID'].astype(str)
+team_df['ID'] = team_df['ID'].astype(str)
 
 # Merge the dataframes on the Team_ID
 merged_df = pd.merge(team_ids_df, team_df, left_on='Team_ID', right_on='ID')
@@ -28,7 +44,10 @@ unique_values_df = pd.DataFrame({
     'SPK Unique': spk_unique
 })
 
-# Write the results to an Excel file
-unique_values_df.to_excel('WMTSPK.xlsx', index=False)
+# Define the output file name
+output_file = os.path.join(processing_folder, 'WMTSPK.xlsx')
 
-print("Unique values have been written to WMTSPK.xlsx")
+# Write the results to an Excel file
+unique_values_df.to_excel(output_file, index=False)
+
+print(f"Unique values have been written to {output_file}")
