@@ -1,0 +1,34 @@
+import pandas as pd
+
+# Load Team_IDs from Excel file
+team_ids_df = pd.read_excel('team_ids.xlsx')  # replace with your actual file
+
+# Read the Parquet file
+team_df = pd.read_parquet('team.parquet')  # replace with your actual file
+
+# Merge the dataframes on the Team_ID
+merged_df = pd.merge(team_ids_df, team_df, left_on='Team_ID', right_on='ID')
+
+# Function to extract unique values from comma-separated entries
+def get_unique_values(series):
+    # Split by comma and then get unique values
+    unique_values = set()
+    for entry in series.dropna():
+        values = entry.split(',')
+        unique_values.update([value.strip() for value in values])
+    return list(unique_values)
+
+# Extract unique values from "Team Backlog" and "SPK" columns
+team_backlog_unique = get_unique_values(merged_df['Team Backlog'])
+spk_unique = get_unique_values(merged_df['SPK'])
+
+# Create a DataFrame for the unique values
+unique_values_df = pd.DataFrame({
+    'Team Backlog Unique': team_backlog_unique,
+    'SPK Unique': spk_unique
+})
+
+# Write the results to an Excel file
+unique_values_df.to_excel('WMTSPK.xlsx', index=False)
+
+print("Unique values have been written to WMTSPK.xlsx")
