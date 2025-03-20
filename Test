@@ -44,9 +44,37 @@ except Exception as e:
     print(f"❌ ERROR: Unable to read input file. {e}")
     exit()
 
-# ✅ Function to fetch the manager email for a given email address
-def fetch_manager_email(email):
-    """Fetch manager email from GAL for the given email address."""
+# ✅ Function to fetch the manager's email from their name
+def fetch_manager_email(manager_name):
+    """Search for a manager's email by their name in the GAL."""
+    if not manager_name or manager_name == "N/A":
+        return "N/A"
+
+    try:
+        print(f"🔍 Looking up Manager: {manager_name} ...")
+        time.sleep(random.uniform(0.5, 2))  # ✅ Add delay to prevent server overload
+
+        resolved_names = account.protocol.resolve_names(manager_name, return_full_contact_data=True)
+
+        if not resolved_names:
+            log_skipped("No GAL record found for Manager", manager_name)
+            return "N/A"
+
+        for user in resolved_names:
+            if isinstance(user, tuple) and len(user) >= 2:
+                email = user[0].email_address if hasattr(user[0], "email_address") else "N/A"
+                return email
+
+        log_skipped("No valid email found for Manager", manager_name)
+        return "N/A"
+
+    except Exception as e:
+        log_skipped(f"Unexpected error while fetching manager email: {e}", manager_name)
+        return "N/A"
+
+# ✅ Function to fetch the manager name and then lookup the manager's email
+def fetch_manager_details(email):
+    """Fetch manager name from GAL, then search for their email."""
     try:
         print(f"🔍 Fetching manager details for: {email} ...")
         time.sleep(random.uniform(0.5, 2))  # ✅ Add delay to prevent server overload
@@ -55,26 +83,23 @@ def fetch_manager_email(email):
 
         if not resolved_names:
             log_skipped("No GAL record found", email)
-            return "N/A"
+            return "N/A", "N/A"
 
         for user in resolved_names:
             if isinstance(user, tuple) and len(user) >= 2:
-                if hasattr(user[1], "manager") and user[1].manager:
-                    manager_email = user[1].manager.email_address if hasattr(user[1].manager, "email_address") else "N/A"
-                    return manager_email
-                else:
-                    log_skipped("Manager not found", email)
-                    return "N/A"
+                manager_name = user[1].manager if hasattr(user[1], "manager") and user[1].manager else "N/A"
+                manager_email = fetch_manager_email(manager_name) if manager_name != "N/A" else "N/A"
+                return manager_name, manager_email
 
-        log_skipped("No valid GAL record found", email)
-        return "N/A"
+        log_skipped("No manager found", email)
+        return "N/A", "N/A"
 
     except Exception as e:
         log_skipped(f"Unexpected error: {e}", email)
-        return "N/A"
+        return "N/A", "N/A"
 
-# ✅ Fetch manager email for each author email
-df_input["Manager Email"] = df_input["Author Email"].apply(fetch_manager_email)
+# ✅ Fetch manager name & email for each author email
+df_input[["Manager Name", "Manager Email"]] = df_input["Author Email"].apply(lambda x: pd.Series(fetch_manager_details(x)))
 
 # ✅ Save the updated Excel file (Overwriting the original)
 df_input.to_excel(OUTPUT_FILE, index=False, encoding="utf-8")
