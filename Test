@@ -1,10 +1,85 @@
-spk_progress}/{total_spks})")
-            # Write output file for each repository.
-            for repo_slug, rows in repo_outputs:
-                if rows:
-                    filename = f"output_{proj_key}_{repo_slug}"
-                    processor.write_chunk(rows, 1, filename_prefix=filename)
-                    main_logger.info(f"Output file for project {proj_key} repo {repo_slug} written.")
-    processor.write_failure_files()
-    main_logger.info(f"Total tokens consumed: {token_bucket.calls_made}")
-    main_logger.info(f"Remaining token capacity: {token_bucket.tokens}")
+import pandas as pd
+import time
+import random
+import os
+from exchangelib import Credentials, Account
+
+# ✅ Define Common Base Path
+BASE_PATH = "C:\\Users\\Public\\"
+
+# ✅ Set File Paths
+INPUT_FILE = os.path.join(BASE_PATH, "input_contacts.xlsx")  # ✅ Input Excel
+OUTPUT_FILE = os.path.join(BASE_PATH, "input_contacts.xlsx")  # ✅ Overwrite same file
+SKIP_LOG_FILE = os.path.join(BASE_PATH, "GAL_Skipped_Entries.log")
+
+# ✅ Set your Exchange credentials
+EMAIL = "your.email@company.com"
+PASSWORD = "your_password"
+
+# ✅ Connect to Exchange
+try:
+    print("Connecting to Exchange...")
+    credentials = Credentials(EMAIL, PASSWORD)
+    account = Account(EMAIL, credentials=credentials, autodiscover=True)
+    print("✅ Connected to Exchange successfully!")
+except Exception as e:
+    print(f"❌ ERROR: Unable to connect to Exchange. {e}")
+    exit()
+
+# ✅ Function to log skipped entries with reason
+def log_skipped(reason, user_data="N/A"):
+    message = f"⚠️ Skipping entry: {reason} | Data: {user_data}"
+    print(message)  # Print to console
+    with open(SKIP_LOG_FILE, "a", encoding="utf-8") as log_file:
+        log_file.write(message + "\n")  # Log to file
+
+# ✅ Read emails from the input Excel file
+try:
+    df_input = pd.read_excel(INPUT_FILE)
+    if "Author Email" not in df_input.columns:
+        raise ValueError("❌ ERROR: 'Author Email' column not found in Excel file.")
+    email_list = df_input["Author Email"].dropna().unique().tolist()
+    print(f"📌 Found {len(email_list)} unique emails to process.")
+except Exception as e:
+    print(f"❌ ERROR: Unable to read input file. {e}")
+    exit()
+
+# ✅ Function to fetch the manager email for a given email address
+def fetch_manager_email(email):
+    """Fetch manager email from GAL for the given email address."""
+    try:
+        print(f"🔍 Fetching manager details for: {email} ...")
+        time.sleep(random.uniform(0.5, 2))  # ✅ Add delay to prevent server overload
+
+        resolved_names = account.protocol.resolve_names(email, return_full_contact_data=True)
+
+        if not resolved_names:
+            log_skipped("No GAL record found", email)
+            return "N/A"
+
+        for user in resolved_names:
+            if isinstance(user, tuple) and len(user) >= 2:
+                if hasattr(user[1], "manager") and user[1].manager:
+                    manager_email = user[1].manager.email_address if hasattr(user[1].manager, "email_address") else "N/A"
+                    return manager_email
+                else:
+                    log_skipped("Manager not found", email)
+                    return "N/A"
+
+        log_skipped("No valid GAL record found", email)
+        return "N/A"
+
+    except Exception as e:
+        log_skipped(f"Unexpected error: {e}", email)
+        return "N/A"
+
+# ✅ Fetch manager email for each author email
+df_input["Manager Email"] = df_input["Author Email"].apply(fetch_manager_email)
+
+# ✅ Save the updated Excel file (Overwriting the original)
+df_input.to_excel(OUTPUT_FILE, index=False, encoding="utf-8")
+
+# ✅ Print execution summary
+print(f"\n✅ Export completed successfully! Manager emails added to {OUTPUT_FILE}")
+print(f"🔹 Total Records Processed: {len(df_input)}")
+print(f"⚠️ Skipped entries logged in: {SKIP_LOG_FILE}")
