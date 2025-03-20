@@ -108,3 +108,4 @@ df_input.to_excel(OUTPUT_FILE, index=False, encoding="utf-8")
 print(f"\n✅ Export completed successfully! Manager emails added to {OUTPUT_FILE}")
 print(f"🔹 Total Records Processed: {len(df_input)}")
 print(f"⚠️ Skipped entries logged in: {SKIP_LOG_FILE}")
+#
