@@ -1,111 +1,22 @@
-import pandas as pd
-import time
-import random
-import os
-from exchangelib import Credentials, Account
+# Set your top_n as needed (e.g., 3, 5, -1)
+top_n = 3  
+merged_data['SkillGap'] = merged_data.apply(lambda row: apply_skill_gap(row, top_n), axis=1)
 
-# ✅ Define Common Base Path
-BASE_PATH = "C:\\Users\\Public\\"
 
-# ✅ Set File Paths
-INPUT_FILE = os.path.join(BASE_PATH, "input_contacts.xlsx")  # ✅ Input Excel
-OUTPUT_FILE = os.path.join(BASE_PATH, "input_contacts.xlsx")  # ✅ Overwrite same file
-SKIP_LOG_FILE = os.path.join(BASE_PATH, "GAL_Skipped_Entries.log")
+def apply_skill_gap(row, top_n=3):
+    author_skills = [skill.strip().lower() for skill in str(row['AuthorSkill']).split(',')]
+    iskill_json = row.get('iSkill', [])
 
-# ✅ Set your Exchange credentials
-EMAIL = "your.email@company.com"
-PASSWORD = "your_password"
+    if not isinstance(iskill_json, list):
+        return 'Yes'
 
-# ✅ Connect to Exchange
-try:
-    print("Connecting to Exchange...")
-    credentials = Credentials(EMAIL, PASSWORD)
-    account = Account(EMAIL, credentials=credentials, autodiscover=True)
-    print("✅ Connected to Exchange successfully!")
-except Exception as e:
-    print(f"❌ ERROR: Unable to connect to Exchange. {e}")
-    exit()
+    # Extract SkillNames from iSkill JSON
+    skill_names = [entry.get('SkillName', '').strip().lower() for entry in iskill_json]
 
-# ✅ Function to log skipped entries with reason
-def log_skipped(reason, user_data="N/A"):
-    message = f"⚠️ Skipping entry: {reason} | Data: {user_data}"
-    print(message)  # Print to console
-    with open(SKIP_LOG_FILE, "a", encoding="utf-8") as log_file:
-        log_file.write(message + "\n")  # Log to file
+    # Pick top N
+    if top_n != -1:
+        skill_names = skill_names[:top_n]
 
-# ✅ Read emails from the input Excel file
-try:
-    df_input = pd.read_excel(INPUT_FILE)
-    if "Author Email" not in df_input.columns:
-        raise ValueError("❌ ERROR: 'Author Email' column not found in Excel file.")
-    email_list = df_input["Author Email"].dropna().unique().tolist()
-    print(f"📌 Found {len(email_list)} unique emails to process.")
-except Exception as e:
-    print(f"❌ ERROR: Unable to read input file. {e}")
-    exit()
-
-# ✅ Function to fetch the manager's email from their name
-def fetch_manager_email(manager_name):
-    """Search for a manager's email by their name in the GAL."""
-    if not manager_name or manager_name == "N/A":
-        return "N/A"
-
-    try:
-        print(f"🔍 Looking up Manager: {manager_name} ...")
-        time.sleep(random.uniform(0.5, 2))  # ✅ Add delay to prevent server overload
-
-        resolved_names = account.protocol.resolve_names(manager_name, return_full_contact_data=True)
-
-        if not resolved_names:
-            log_skipped("No GAL record found for Manager", manager_name)
-            return "N/A"
-
-        for user in resolved_names:
-            if isinstance(user, tuple) and len(user) >= 2:
-                email = user[0].email_address if hasattr(user[0], "email_address") else "N/A"
-                return email
-
-        log_skipped("No valid email found for Manager", manager_name)
-        return "N/A"
-
-    except Exception as e:
-        log_skipped(f"Unexpected error while fetching manager email: {e}", manager_name)
-        return "N/A"
-
-# ✅ Function to fetch the manager name and then lookup the manager's email
-def fetch_manager_details(email):
-    """Fetch manager name from GAL, then search for their email."""
-    try:
-        print(f"🔍 Fetching manager details for: {email} ...")
-        time.sleep(random.uniform(0.5, 2))  # ✅ Add delay to prevent server overload
-
-        resolved_names = account.protocol.resolve_names(email, return_full_contact_data=True)
-
-        if not resolved_names:
-            log_skipped("No GAL record found", email)
-            return "N/A", "N/A"
-
-        for user in resolved_names:
-            if isinstance(user, tuple) and len(user) >= 2:
-                manager_name = user[1].manager if hasattr(user[1], "manager") and user[1].manager else "N/A"
-                manager_email = fetch_manager_email(manager_name) if manager_name != "N/A" else "N/A"
-                return manager_name, manager_email
-
-        log_skipped("No manager found", email)
-        return "N/A", "N/A"
-
-    except Exception as e:
-        log_skipped(f"Unexpected error: {e}", email)
-        return "N/A", "N/A"
-
-# ✅ Fetch manager name & email for each author email
-df_input[["Manager Name", "Manager Email"]] = df_input["Author Email"].apply(lambda x: pd.Series(fetch_manager_details(x)))
-
-# ✅ Save the updated Excel file (Overwriting the original)
-df_input.to_excel(OUTPUT_FILE, index=False, encoding="utf-8")
-
-# ✅ Print execution summary
-print(f"\n✅ Export completed successfully! Manager emails added to {OUTPUT_FILE}")
-print(f"🔹 Total Records Processed: {len(df_input)}")
-print(f"⚠️ Skipped entries logged in: {SKIP_LOG_FILE}")
-#
+    # Check for any match
+    has_match = any(skill in skill_names for skill in author_skills)
+    return 'No' if has_match else 'Yes'
