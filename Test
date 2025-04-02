@@ -73,3 +73,25 @@ filterBBDatabyTechExec() { const techExecCodes = this.techExec.map(exec => exec.
 
 resetData() { this.BBdata = [...this.cloneData]; } }
 
+// Save original console method
+const originalLog = console.log;
+
+// Check flag in localStorage
+const shouldLog = localStorage.getItem('enableLogging') === 'true';
+
+// Override console.log
+console.log = function (...args: any[]) {
+  if (shouldLog) {
+    originalLog.apply(console, args);
+    // Optional: send logs to a server or store locally
+  }
+};
+
+// You can do the same for console.error, console.warn, etc.
+// console.error = ...
+
+import { platformBrowserDynamic } from '@angular/platform-browser-dynamic';
+import { AppModule } from './app/app.module';
+
+platformBrowserDynamic().bootstrapModule(AppModule)
+  .catch(err => console.error(err));
