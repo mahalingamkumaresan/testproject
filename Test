@@ -1,33 +1,75 @@
-const authorNames = new Set<string>();
-const projectKeys = new Set<string>();
-const authorEmails = new Set<string>();
-const repoSlugs = new Set<string>();
-const spkCounts = new Set<string>();
-const teamCounts = new Set<string>();
-const delBydh = new Set<string>();
-const deliveryLeads = new Set<string>();
+import { Component, OnInit } from '@angular/core'; import { Router } from '@angular/router'; import { MenuItem } from 'primeng/api'; import { CommonUtilService } from '../../../services/util.service'; import { BitBucketService } from '../../../services/bitbucket.service'; import AITDATA from '../../../AIT.json';
 
-let totalCommits = 0;
+interface OptionFilter { name: string; code: string; }
 
-this.BBdata.forEach(item => {
-  authorNames.add(item.AuthorName);
-  projectKeys.add(item.ProjectKey);
-  authorEmails.add(item.AuthorEmail);
-  repoSlugs.add(item.Reposlug);
-  spkCounts.add(item.ProjectKey); // same as projectKeys, maybe redundant?
-  teamCounts.add(item.Team);
-  delBydh.add(item.Del?.any); // check for null safely
-  deliveryLeads.add(item.DeliveryLeader);
+@Component({ selector: 'app-bb-dashboard', templateUrl: './dashboard.component.html', styleUrls: ['./dashboard.component.css'] }) export class BBDashboardComponent implements OnInit { pageName: any = 'BBDashboard'; menuBarItems: MenuItem[] | undefined; BBdata: any[] = []; BBncdata: any[] = []; bbdatabydl = 0; bbdatabyhl = 0; aitData: any[] = AITDATA; isDataLoading = false; loadPercentage = 0; total = 0; uniqueRepoCount = 0; uniqueSPKCount = 0; uniqueTeamCount = 0; uniqueNonContributorsCount = 0; uniqueBBContributorsCount = 0; filteredEmployees: any[] = []; uniqueContributors = 0; selectedExecs = this.util.getSelectedTechExec(); dataFilterContent = '+tenDOTHierarchy.tk:(VGO*) AND !observationType.tk:(...)'; dataFilterHeader = 'CM Filter'; scoreCardStatus = ['First Consequence Eligible', 'Approaching first Consequence', 'Second Consequence Eligible', 'Approaching Second Consequence']; graphTitles = [ { type: 'first' }, { type: 'second' } ]; cloneData: any[] = [];
 
-  totalCommits += item.TotalCommits || 0;
+techExec = [ { name: 'Brandon I Kane', code: 'Brandon I Kane' }, { name: 'Bassma Elshmemmy', code: 'Bassma Elshmemmy' }, { name: 'David M. Ingham', code: 'David M. Ingham' }, { name: 'Rohit Khanna', code: 'Rohit Khanna' }, { name: 'Chris Reimers', code: 'Chris Reimers' }, { name: 'Amish Seth', code: 'Amish Seth' }, { name: 'Cameron Wadley', code: 'Cameron Wadley' }, { name: 'Suneetha Sadda', code: 'Suneetha Sadda' } ];
+
+constructor(private router: Router, private util: CommonUtilService, private bbservice: BitBucketService) {}
+
+ngOnInit(): void { this.menuBarItems = [ { label: 'Dashboard', routerLink: '/BBDashboard', routerLinkActiveOptions: { exact: true }, routerLinkActive: 'active-link' }, { label: 'Team Contributions', routerLink: '/BBProductivity', visible: false, routerLinkActiveOptions: { exact: true }, routerLinkActive: 'active-link' }, { label: 'Team Contributions', routerLink: '/BBSummary', routerLinkActiveOptions: { exact: true }, routerLinkActive: 'active-link' }, { label: 'Non-Bitbucket Contributors', routerLink: '/NonContributors', visible: false, routerLinkActiveOptions: { exact: true }, routerLinkActive: 'active-link' } ]; this.populateData(); }
+
+appendManagerDetails() { if (!this.aitData.length) return; for (let i = 0; i < this.BBdata.length; i++) { const item = this.BBdata[i]; const manager = this.aitData.find(ait => ait.ApplicationID === item.AIT); if (manager) { this.BBdata[i] = { ...item, TECHEXEC: manager.TechnicalExecutive, TECH1EXEC: manager.ApplicationSupport, MANAGER: manager.ApplicationManager }; } } }
+
+private transformValues(data: any[]) { for (let i = 0; i < data.length; i++) { const item = data[i]; if (item.AuthorRole) { const parts = item.AuthorRole.split(';'); const raw = parts[1]?.split('-')[0].trim() || null; item.AuthorRole = raw; } else { item.AuthorRole = null; } } return data; }
+
+populateData() { this.isDataLoading = true; const techExecFilterStr = localStorage.getItem('SelectedStore'); const techExecFilters = techExecFilterStr ? JSON.parse(techExecFilterStr) : null;
+
+if (!techExecFilters) return;
+
+this.bbservice.getBBStoreDetails(techExecFilters.code).subscribe(dataBB => {
+  this.bbservice.getBBStoreDetails(techExecFilters.nc).subscribe(data => {
+    this.BBncdata = this.transformValues([...data]);
+    if (this.BBncdata.length) {
+      this.BBncdata = this.util.applyGlobalFilters(this.BBncdata, 'selectedCIOTechExec', 'CIO1NBKID');
+      this.BBncdata = this.util.applyGlobalFilters(this.BBncdata, 'selectedTechExec', 'CIO2NBKID');
+      this.uniqueTeamCount = new Set(this.BBncdata.map(i => i.Team)).size;
+    }
+
+    this.BBdata = this.transformValues([...dataBB]);
+    if (this.BBdata.length) {
+      this.BBdata = this.util.applyGlobalFilters(this.BBdata, 'selectedCIOTechExec', 'CIO1NBKID');
+      this.BBdata = this.util.applyGlobalFilters(this.BBdata, 'selectedTechExec', 'CIO2NBKID');
+      this.BBdata = this.util.applyTechExecFilters(this.BBdata, 'TechExec');
+      this.BBdata = this.util.applyTechSkillFilters(this.BBdata, 'AuthorSkill');
+    }
+
+    const unique = {
+      repo: new Set(), spk: new Set(), team: new Set(),
+      author: new Set(), project: new Set(), email: new Set(),
+      deliveryHead: new Set(), deliveryLeader: new Set()
+    };
+
+    for (const item of this.BBdata) {
+      unique.repo.add(item.RepoSlug);
+      unique.spk.add(item.ProjectKey);
+      unique.team.add(item.Team);
+      unique.author.add(item.AuthorName);
+      unique.project.add(item.ProjectKey);
+      unique.email.add(item.AuthorEmail);
+      unique.deliveryHead.add(item.DeliveryHead);
+      unique.deliveryLeader.add(item.DeliveryLeader);
+    }
+
+    this.uniqueRepoCount = unique.repo.size;
+    this.uniqueSPKCount = unique.spk.size;
+    this.uniqueTeamCount = unique.team.size;
+    this.uniqueBBContributorsCount = unique.author.size;
+    this.uniqueContributors = unique.project.size;
+    this.uniqueNonContributorsCount = unique.email.size;
+    this.bbdatabydl = unique.deliveryHead.size;
+    this.bbdatabyhl = unique.deliveryLeader.size;
+
+    this.cloneData = [...this.BBdata];
+    this.total = this.BBdata.reduce((acc, item) => acc + (item.TotalCommits || 0), 0);
+    this.isDataLoading = false;
+  });
 });
 
-this.uniqueBBContributorsCount = authorNames.size;
-this.uniqueContributors = projectKeys.size;
-this.uniqueNonContributors = authorEmails.size;
-this.total = totalCommits;
-this.uniqueRepoCount = repoSlugs.size;
-this.uniqueSPKCount = spkCounts.size;
-this.uniqueTeamCount = teamCounts.size;
-this.bbdatabydh = delBydh.size;
-this.bbdatabydl = deliveryLeads.size;
+}
+
+filterBBDatabyTechExec() { const techExecCodes = this.techExec.map(exec => exec.code); this.BBdata = this.BBdata.filter(item => techExecCodes.includes(item.TECHEXEC)); }
+
+resetData() { this.BBdata = [...this.cloneData]; } }
+
