@@ -1,47 +1,16 @@
-onRoleChange(selectedRole: string) {
-  const newData = this.getChartData(selectedRole);
-  this.chart.series[0].setData(newData);
-}
+let skillGapYesSet = new Set<string>();
+let skillGapNoSet = new Set<string>();
 
+this.InputFilterData.forEach(item => {
+  const email = item.AuthorEmail;
+  const skillGap = item.SkillGap?.toString().trim().toLowerCase();
 
-get roleOptions(): string[] {
-  return Array.from(this.roleCountsMap.keys());
-}
-
-<select (change)="onRoleChange($event.target.value)">
-  <option value="all">All</option>
-  <option *ngFor="let role of roleOptions" [value]="role">{{ role }}</option>
-</select>
-
-getChartData(role: string): { name: string, y: number }[] {
-  if (role === 'all') {
-    return this.allRoleCounts;
+  if (skillGap === 'yes') {
+    skillGapYesSet.add(email);
+  } else if (skillGap === 'no' || skillGap === '' || skillGap === 'na' || skillGap === null) {
+    skillGapNoSet.add(email);
   }
+});
 
-  const authors = this.roleCountsMap.get(role);
-  return authors ? [{ name: role, y: authors.size }] : [];
-}
-
-
-roleCountsMap: Map<string, Set<string>> = new Map();
-allRoleCounts: { name: string, y: number }[] = [];
-
-processData(data: any[]) {
-  data.forEach(item => {
-    const role = item.empRole;
-    const author = item.AuthorName;
-
-    if (role && author) {
-      if (!this.roleCountsMap.has(role)) {
-        this.roleCountsMap.set(role, new Set());
-      }
-      this.roleCountsMap.get(role)!.add(author);
-    }
-  });
-
-  // Prepare initial full data
-  this.allRoleCounts = Array.from(this.roleCountsMap.entries()).map(([role, authors]) => ({
-    name: role,
-    y: authors.size
-  }));
-}
+const skillGapYes = skillGapYesSet.size;
+const skillGapNo = skillGapNoSet.size;
