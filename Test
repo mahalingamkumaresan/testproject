@@ -1,16 +1,46 @@
-let skillGapYesSet = new Set<string>();
-let skillGapNoSet = new Set<string>();
+interface SkillGapByRole {
+  [role: string]: {
+    yes: Set<string>;
+    no: Set<string>;
+  };
+}
+
+const skillGapMap: SkillGapByRole = {};
 
 this.InputFilterData.forEach(item => {
   const email = item.AuthorEmail;
+  const role = item.empRole?.trim() || 'Unknown';
   const skillGap = item.SkillGap?.toString().trim().toLowerCase();
 
+  if (!skillGapMap[role]) {
+    skillGapMap[role] = { yes: new Set(), no: new Set() };
+  }
+
   if (skillGap === 'yes') {
-    skillGapYesSet.add(email);
+    skillGapMap[role].yes.add(email);
   } else if (skillGap === 'no' || skillGap === '' || skillGap === 'na' || skillGap === null) {
-    skillGapNoSet.add(email);
+    skillGapMap[role].no.add(email);
   }
 });
+onRoleChange(selectedRole: string) {
+  if (selectedRole === 'all') {
+    let totalYes = 0;
+    let totalNo = 0;
+    for (const role of this.roleOptions) {
+      totalYes += this.skillGapMap[role]?.yes.size || 0;
+      totalNo += this.skillGapMap[role]?.no.size || 0;
+    }
 
-const skillGapYes = skillGapYesSet.size;
-const skillGapNo = skillGapNoSet.size;
+    this.updateChart(totalYes, totalNo);
+  } else {
+    const roleData = this.skillGapMap[selectedRole] || { yes: new Set(), no: new Set() };
+    this.updateChart(roleData.yes.size, roleData.no.size);
+  }
+}
+
+updateChart(yes: number, no: number) {
+  this.chart.series[0].setData([
+    { name: 'Skill Gap = Yes', y: yes },
+    { name: 'Skill Gap = No', y: no }
+  ]);
+}
