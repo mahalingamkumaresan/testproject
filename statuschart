@@ -1,0 +1,241 @@
+import {
+  Component,
+  OnInit,
+  Input,
+  HostListener
+} from '@angular/core';
+import * as Highcharts from 'highcharts';
+import { Router } from '@angular/router';
+import { CommonUtilService } from './../../services/util.service';
+import { BitBucketService } from './../../services/bitbucket.service';
+import CIOJSON from '../../../CIOJSON.json';
+
+@Component({
+  selector: 'app-BBgraphbystatus',
+  templateUrl: './graphbystatus.component.html',
+  styleUrls: ['./graphbystatus.component.css']
+})
+export class BBGraphByStatusComponent implements OnInit {
+  summary: any[] = [];
+  @Input() InputFilterData: any[] = [];
+
+  Highcharts: typeof Highcharts = Highcharts;
+  chartOptions: Highcharts.Options = {};
+  CIOJson: any[] = CIOJSON;
+  chartInstance!: Highcharts.Chart;
+
+  constructor(
+    private router: Router,
+    private util: CommonUtilService,
+    private BBservice: BitBucketService
+  ) {}
+
+  ngOnInit() {
+    if (this.InputFilterData.length > 0) {
+      this.populateChart();
+    }
+  }
+
+  private formatDate(input: string): string {
+    const months: any = {
+      Jan: "01", Feb: "02", Mar: "03", Apr: "04",
+      May: "05", Jun: "06", Jul: "07", Aug: "08",
+      Sep: "09", Oct: "10", Nov: "11", Dec: "12"
+    };
+    const [month, year] = input.split(" ");
+    return `${year}-${months[month]}`;
+  }
+
+  callExternalFunction(data: any) {
+    const matchedCIO = this.CIOJson.find((cio: any) => cio.CIO === data.point.series.name);
+    if (matchedCIO) {
+      data.point.category = matchedCIO.CIOID;
+    }
+
+    this.BBservice.setbbData([{
+      ReqFrom: "BYTECHEXEMONTH",
+      ReqParams: {
+        TechExec: data.point.series.name,
+        Month: this.formatDate(data.point.month)
+      }
+    }]);
+    this.router.navigate(['/BBSummary'], { fragment: 'contributors' });
+  }
+
+  processAITData(data: any[], graphLevel: string) {
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+    const uniqueMonthKeys = [...new Set(data.map(item => item.Month))]
+      .filter(m => !!m && m !== '[Empty]')
+      .sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
+
+    const months = uniqueMonthKeys.map(m => {
+      const [year, month] = m.split("-").map(Number);
+      return {
+        key: m, // '2025-02'
+        label: `${monthNames[month - 1]} ${year}` // 'Feb 2025'
+      };
+    });
+
+    let groupedData: any = {};
+
+    data.forEach(item => {
+      if (!item.Month || item.Month === '[Empty]') return;
+
+      const [year, month] = item.Month.split("-").map(Number);
+      const monthKey = item.Month;
+      const monthLabel = `${monthNames[month - 1]} ${year}`;
+
+      if (!groupedData[item[graphLevel]]) {
+        groupedData[item[graphLevel]] = {
+          name: item[graphLevel],
+          total: 0,
+          data: {}
+        };
+        months.forEach(m => groupedData[item[graphLevel]].data[m.label] = 0);
+      }
+
+      const commits = parseFloat(item.TotalCommits) || 0;
+      groupedData[item[graphLevel]].data[monthLabel] += commits;
+      groupedData[item[graphLevel]].total += commits;
+    });
+
+    let seriesData: any[] = [];
+    let xCategories: any[] = months.map(m => m.label);
+
+    let sortedAITs = Object.entries(groupedData)
+      .sort(([, a]: any, [, b]: any) => b.total - a.total)
+      .slice(0, 10);
+
+    sortedAITs.forEach(([app, value]: any, index) => {
+      seriesData.push({
+        name: app,
+        data: months.map(m => ({
+          x: index * 4 + (months.indexOf(m) / 3),
+          y: parseFloat(value.data[m.label].toFixed(2)),
+          month: m.label
+        })),
+        fillOpacity: 0.3,
+        marker: { enabled: true }
+      });
+    });
+
+    return { categories: xCategories, series: seriesData };
+  }
+
+  populateChart() {
+    const data = this.InputFilterData;
+    let graphTitle = "Contribution Trends by CIO ";
+    let graphLevel = "CIONBKID";
+
+    if (this.util.getSelectedCIOCount() === 1) {
+      graphTitle = "Contribution Trends by CIO Tech Executive";
+      graphLevel = "CIO1NBKID";
+    }
+
+    if (this.util.getSelectedCIOTechExecCount() > 1) {
+      graphTitle = "Contribution Trends by CIO Tech Executives";
+      graphLevel = "CIO1NBKID";
+    }
+
+    if (this.util.getSelectedCIOTechExecCount() === 1) {
+      graphTitle = "Contribution Trends by Tech Executive";
+      graphLevel = "CIO2NBKID";
+    }
+
+    if (this.util.getSelectedTechExecCount() === 1) {
+      graphTitle = "Contribution Trends by Tech Executive One-down";
+      graphLevel = "TechExec1Down";
+    }
+
+    const { categories, series } = this.processAITData(this.InputFilterData, graphLevel);
+
+    this.chartOptions = {
+      chart: {
+        type: 'areaspline',
+        height: 400,
+        width: 200
+      },
+      title: {
+        text: graphTitle,
+        align: 'left'
+      },
+      xAxis: {
+        categories: categories,
+        title: { text: 'Month' },
+        labels: { rotation: -90 }
+      },
+      yAxis: {
+        min: 0,
+        title: { text: 'Total Commits' }
+      },
+      tooltip: {
+        shared: true,
+        style: {
+          fontSize: '1rem',
+          fontFamily: 'Inter var, sans-serif'
+        },
+        formatter: function () {
+          let tooltipText = this.points?.[0]?.point
+            ? `<b>${(this.points as any[])[0].point.month}</b><br/>`
+            : '';
+          if (this.points) {
+            this.points.forEach(point => {
+              tooltipText += `${point.series.name}: <b>${point.y.toFixed(2)}</b><br/>`;
+            });
+          } else {
+            tooltipText += `${this.series.name}: <b>${this.y?.toFixed(2)}</b><br/>`;
+          }
+          return tooltipText;
+        }
+      },
+      legend: {
+        enabled: true,
+        labelFormatter: function () {
+          return this.name;
+        }
+      },
+      plotOptions: {
+        series: {
+          cursor: 'pointer',
+          events: {
+            click: this.callExternalFunction.bind(this)
+          }
+        }
+      },
+      credits: { enabled: false },
+      exporting: {
+        buttons: {
+          contextButton: {
+            menuItems: ['viewFullscreen', 'downloadJPEG', 'downloadPDF']
+          }
+        }
+      },
+      series: series.map((s: any, index: number) => ({
+        ...s,
+        dataLabels: {
+          enabled: true,
+          align: 'center',
+          verticalAlign: 'bottom',
+          y: -20,
+          x: index * 4,
+          formatter: function (this: Highcharts.PointLabelObject) {
+            return this.point.index === 0 ? s.name : null;
+          },
+          style: { fontSize: "12px", fontWeight: 'bold', textOutline: 'none' }
+        }
+      }))
+    };
+  }
+
+  private reflowChart() {
+    if (this.chartInstance) {
+      this.chartInstance.reflow();
+    }
+  }
+
+  @HostListener('window:resize')
+  onWindowResize() {
+    this.reflowChart();
+  }
+}
