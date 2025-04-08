@@ -1,111 +1,140 @@
-<app-skill-usage-table [commitData]="bitbucketData"></app-skill-usage-table>
+.uptick {
+  background-color: #d0f5d0 !important;
+}
 
-<table border="1" *ngIf="processedData.length > 0">
-  <thead>
+.legend {
+  margin-top: 1rem;
+  font-size: 14px;
+}
+
+.legend ul {
+  list-style: none;
+  padding: 0;
+}
+
+.legend li {
+  margin: 4px 0;
+}
+
+.highlight-box {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  background-color: #d0f5d0;
+  border: 1px solid #999;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+
+<p-table [value]="processedData" *ngIf="processedData.length">
+  <ng-template pTemplate="header">
     <tr>
-      <th>Trainee</th>
-      <th colspan="3">Java</th>
-      <th colspan="3">Angular</th>
-      <th colspan="3">HTML</th>
+      <th rowspan="2">Trainee</th>
+      <ng-container *ngFor="let tech of allTechnologies">
+        <th colspan="3">{{ tech | titlecase }}</th>
+      </ng-container>
     </tr>
     <tr>
-      <th></th>
-      <th>Before</th>
-      <th>During</th>
-      <th>After</th>
-      <th>Before</th>
-      <th>During</th>
-      <th>After</th>
-      <th>Before</th>
-      <th>During</th>
-      <th>After</th>
+      <ng-container *ngFor="let tech of allTechnologies">
+        <th>Before</th>
+        <th>During</th>
+        <th>After</th>
+      </ng-container>
     </tr>
-  </thead>
-  <tbody>
-    <tr *ngFor="let row of processedData">
+  </ng-template>
+
+  <ng-template pTemplate="body" let-row>
+    <tr>
       <td>{{ row.trainee }}</td>
-      <td>{{ row.javaBefore }}%</td>
-      <td>{{ row.javaDuring }}%</td>
-      <td>{{ row.javaAfter }}%</td>
-      <td>{{ row.angularBefore }}%</td>
-      <td>{{ row.angularDuring }}%</td>
-      <td>{{ row.angularAfter }}%</td>
-      <td>{{ row.htmlBefore }}%</td>
-      <td>{{ row.htmlDuring }}%</td>
-      <td>{{ row.htmlAfter }}%</td>
+      <ng-container *ngFor="let tech of allTechnologies">
+        <td>{{ row[tech + '_before'] }}%</td>
+        <td [ngClass]="{ 'uptick': hasUptick(row, tech, 'during') }">{{ row[tech + '_during'] }}%</td>
+        <td [ngClass]="{ 'uptick': hasUptick(row, tech, 'after') }">{{ row[tech + '_after'] }}%</td>
+      </ng-container>
     </tr>
-  </tbody>
-</table>
+  </ng-template>
+</p-table>
+
+<div class="legend">
+  <p><strong>Legend:</strong></p>
+  <ul>
+    <li><strong>Before:</strong> January 2024 – March 2024</li>
+    <li><strong>During:</strong> April 2024 – July 2024</li>
+    <li><strong>After:</strong> August 2024 – March 2025</li>
+    <li><span class="highlight-box"></span> <strong>Green Highlight:</strong> Indicates an uptick in tech usage compared to earlier phase(s)</li>
+  </ul>
+</div>
 
 import { Component, Input, OnChanges } from '@angular/core';
 
 @Component({
   selector: 'app-skill-usage-table',
-  templateUrl: './skill-usage-table.component.html'
+  templateUrl: './skill-usage-table.component.html',
+  styleUrls: ['./skill-usage-table.component.css']
 })
 export class SkillUsageTableComponent implements OnChanges {
   @Input() commitData: any[] = [];
 
   processedData: any[] = [];
+  allTechnologies: string[] = [];
+  trainingStart = '2024-04';
+  trainingEnd = '2024-07';
 
-  readonly trainingStart = '2024-04';
-  readonly trainingEnd = '2024-07';
+  ngOnChanges(): void {
+    if (!this.commitData?.length) return;
 
-  ngOnChanges() {
-    if (this.commitData?.length) {
-      const traineeMap: Record<string, any> = {};
+    const techSet = new Set<string>();
+    const traineeMap: Record<string, any> = {};
 
-      this.commitData.forEach(commit => {
-        const email = commit.AuthorEmail?.toLowerCase();
-        const month = commit.Month;
-        const technologies = commit.Technology?.split(',').map((t: string) => t.trim()) || [];
+    this.commitData.forEach(commit => {
+      const email = commit.AuthorEmail?.toLowerCase();
+      const month = commit.Month;
+      const techList = commit.Technology?.split(',').map((t: string) => t.trim().toLowerCase()) || [];
 
-        if (!email || !month) return;
+      if (!email || !month) return;
 
-        let phase: 'before' | 'during' | 'after';
-        if (month < this.trainingStart) phase = 'before';
-        else if (month <= this.trainingEnd) phase = 'during';
-        else phase = 'after';
+      let phase: 'before' | 'during' | 'after';
+      if (month < this.trainingStart) phase = 'before';
+      else if (month <= this.trainingEnd) phase = 'during';
+      else phase = 'after';
 
-        if (!traineeMap[email]) {
-          traineeMap[email] = {
-            trainee: email,
-            javaBefore: 0, javaDuring: 0, javaAfter: 0,
-            angularBefore: 0, angularDuring: 0, angularAfter: 0,
-            htmlBefore: 0, htmlDuring: 0, htmlAfter: 0,
-            totalBefore: 0, totalDuring: 0, totalAfter: 0,
-          };
+      if (!traineeMap[email]) {
+        traineeMap[email] = { trainee: email, total: { before: 0, during: 0, after: 0 }, data: {} };
+      }
+
+      traineeMap[email].total[phase]++;
+
+      techList.forEach(tech => {
+        techSet.add(tech);
+        if (!traineeMap[email].data[tech]) {
+          traineeMap[email].data[tech] = { before: 0, during: 0, after: 0 };
         }
+        traineeMap[email].data[tech][phase]++;
+      });
+    });
 
-        technologies.forEach(tech => {
-          const lowerTech = tech.toLowerCase();
-          const target = traineeMap[email];
+    this.allTechnologies = Array.from(techSet).sort();
 
-          if (phase === 'before') target.totalBefore++;
-          if (phase === 'during') target.totalDuring++;
-          if (phase === 'after') target.totalAfter++;
-
-          if (lowerTech.includes('java')) target[`java${this.capitalize(phase)}`]++;
-          if (lowerTech.includes('angular')) target[`angular${this.capitalize(phase)}`]++;
-          if (lowerTech.includes('html')) target[`html${this.capitalize(phase)}`]++;
+    // Final formatted data
+    this.processedData = Object.values(traineeMap).map((entry: any) => {
+      const result: any = { trainee: entry.trainee };
+      this.allTechnologies.forEach(tech => {
+        ['before', 'during', 'after'].forEach(phase => {
+          const count = entry.data[tech]?.[phase] || 0;
+          const total = entry.total[phase] || 1;
+          result[`${tech}_${phase}`] = Math.round((count / total) * 100);
         });
       });
-
-      // Convert counts to percentages
-      this.processedData = Object.values(traineeMap).map((entry: any) => {
-        ['java', 'angular', 'html'].forEach(skill => {
-          ['Before', 'During', 'After'].forEach(phase => {
-            const totalKey = `total${phase}`;
-            const skillKey = `${skill}${phase}`;
-            entry[skillKey] = entry[totalKey] ? Math.round((entry[skillKey] / entry[totalKey]) * 100) : 0;
-          });
-        });
-        return entry;
-      });
-    }
+      return result;
+    });
   }
 
-  private capitalize(text: string): string {
-    return text.charAt(0).toUpperCase() + text.slice(1);
+  hasUptick(row: any, tech: string, phase: 'during' | 'after'): boolean {
+    const beforeVal = row[`${tech}_before`] || 0;
+    const phaseVal = row[`${tech}_${phase}`] || 0;
+    if (phase === 'during') return phaseVal > beforeVal;
+    if (phase === 'after') return phaseVal > row[`${tech}_during`] || phaseVal > beforeVal;
+    return false;
   }
 }
