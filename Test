@@ -1,31 +1,114 @@
-.uptick {
-  background-color: #d0f5d0 !important;
-}
+import { Component, Input, OnChanges } from '@angular/core';
 
-.legend {
-  margin-top: 1rem;
-  font-size: 14px;
-}
+@Component({
+  selector: 'app-skill-usage-table',
+  templateUrl: './skill-usage-table.component.html',
+  styleUrls: ['./skill-usage-table.component.css']
+})
+export class SkillUsageTableComponent implements OnChanges {
+  @Input() commitData: any[] = [];
 
-.legend ul {
-  list-style: none;
-  padding: 0;
-}
+  processedData: any[] = [];
+  allTechnologies: string[] = [];
+  readonly trainingStart = '2024-04';
+  readonly trainingEnd = '2024-07';
 
-.legend li {
-  margin: 4px 0;
-}
+  private readonly relevantTechMap: Record<string, string> = {
+    '.java': 'Java',
+    '.ts': 'Angular',
+    '.js': 'JavaScript',
+    '.html': 'HTML',
+    '.css': 'Angular',
+    '.scss': 'Angular',
+    '.jsx': 'React',
+    '.tsx': 'React',
+    '.xml': 'Spring',
+    '.yml': 'Spring',
+    '.yaml': 'Spring',
+    '.properties': 'Spring',
+    '.sql': 'Database',
+    '.json': 'MongoDB',
+    '.hql': 'Hadoop',
+    '.groovy': 'Jenkins',
+    'pom.xml': 'Maven',
+    'build.gradle': 'Gradle',
+    'Dockerfile': 'IAAS',
+    'Jenkinsfile': 'Jenkins',
+    '.spec.ts': 'Jest',
+    '.test.ts': 'Jest'
+  };
 
-.highlight-box {
-  display: inline-block;
-  width: 12px;
-  height: 12px;
-  background-color: #d0f5d0;
-  border: 1px solid #999;
-  margin-right: 8px;
-  vertical-align: middle;
-}
+  ngOnChanges(): void {
+    if (!this.commitData?.length) return;
 
+    const techSet = new Set<string>();
+    const traineeMap: Record<string, any> = {};
+
+    for (const commit of this.commitData) {
+      const email = commit.AuthorEmail?.toLowerCase();
+      const month = commit.Month;
+      const fileList = commit.FileName?.split(',').map(f => f.trim().toLowerCase()) || [];
+
+      if (!email || !month) continue;
+
+      const phase: 'before' | 'during' | 'after' =
+        month < this.trainingStart ? 'before' :
+        month <= this.trainingEnd ? 'during' : 'after';
+
+      const techsInCommit = new Set<string>();
+
+      for (const file of fileList) {
+        for (const ext in this.relevantTechMap) {
+          if (file.endsWith(ext)) {
+            const tech = this.relevantTechMap[ext].toLowerCase();
+            techsInCommit.add(tech);
+          }
+        }
+      }
+
+      if (!techsInCommit.size) continue;
+
+      if (!traineeMap[email]) {
+        traineeMap[email] = {
+          trainee: email,
+          total: { before: 0, during: 0, after: 0 },
+          data: {}
+        };
+      }
+
+      traineeMap[email].total[phase]++;
+
+      for (const tech of techsInCommit) {
+        techSet.add(tech);
+        if (!traineeMap[email].data[tech]) {
+          traineeMap[email].data[tech] = { before: 0, during: 0, after: 0 };
+        }
+        traineeMap[email].data[tech][phase]++;
+      }
+    }
+
+    this.allTechnologies = Array.from(techSet).sort();
+
+    this.processedData = Object.values(traineeMap).map((entry: any) => {
+      const result: any = { trainee: entry.trainee };
+      this.allTechnologies.forEach(tech => {
+        ['before', 'during', 'after'].forEach(phase => {
+          const count = entry.data[tech]?.[phase] || 0;
+          const total = entry.total[phase] || 1;
+          result[`${tech}_${phase}`] = Math.round((count / total) * 100);
+        });
+      });
+      return result;
+    });
+  }
+
+  hasUptick(row: any, tech: string, phase: 'during' | 'after'): boolean {
+    const before = row[`${tech}_before`] || 0;
+    const during = row[`${tech}_during`] || 0;
+    const after = row[`${tech}_after`] || 0;
+    return phase === 'during' ? during > before : after > during || after > before;
+  }
+}
 
 <p-table [value]="processedData" *ngIf="processedData.length">
   <ng-template pTemplate="header">
@@ -56,85 +139,16 @@
   </ng-template>
 </p-table>
 
+<!-- LEGEND -->
 <div class="legend">
   <p><strong>Legend:</strong></p>
   <ul>
     <li><strong>Before:</strong> January 2024 – March 2024</li>
     <li><strong>During:</strong> April 2024 – July 2024</li>
     <li><strong>After:</strong> August 2024 – March 2025</li>
-    <li><span class="highlight-box"></span> <strong>Green Highlight:</strong> Indicates an uptick in tech usage compared to earlier phase(s)</li>
+    <li><span class="highlight-box"></span> <strong>Green Highlight:</strong> Indicates an uptick in usage compared to the earlier phase</li>
+    <li><strong>Technologies Covered in Training:</strong>
+      Java, Spring Boot, Angular, HTML, CSS, TypeScript, React, MongoDB, SQL, Jest, Swagger, REST, JUnit, Hibernate, JPA, Kafka, Openshift, Jenkins, Maven, Gradle, IAAS, YAML, JSON, Dockerfile
+    </li>
   </ul>
 </div>
-
-import { Component, Input, OnChanges } from '@angular/core';
-
-@Component({
-  selector: 'app-skill-usage-table',
-  templateUrl: './skill-usage-table.component.html',
-  styleUrls: ['./skill-usage-table.component.css']
-})
-export class SkillUsageTableComponent implements OnChanges {
-  @Input() commitData: any[] = [];
-
-  processedData: any[] = [];
-  allTechnologies: string[] = [];
-  trainingStart = '2024-04';
-  trainingEnd = '2024-07';
-
-  ngOnChanges(): void {
-    if (!this.commitData?.length) return;
-
-    const techSet = new Set<string>();
-    const traineeMap: Record<string, any> = {};
-
-    this.commitData.forEach(commit => {
-      const email = commit.AuthorEmail?.toLowerCase();
-      const month = commit.Month;
-      const techList = commit.Technology?.split(',').map((t: string) => t.trim().toLowerCase()) || [];
-
-      if (!email || !month) return;
-
-      let phase: 'before' | 'during' | 'after';
-      if (month < this.trainingStart) phase = 'before';
-      else if (month <= this.trainingEnd) phase = 'during';
-      else phase = 'after';
-
-      if (!traineeMap[email]) {
-        traineeMap[email] = { trainee: email, total: { before: 0, during: 0, after: 0 }, data: {} };
-      }
-
-      traineeMap[email].total[phase]++;
-
-      techList.forEach(tech => {
-        techSet.add(tech);
-        if (!traineeMap[email].data[tech]) {
-          traineeMap[email].data[tech] = { before: 0, during: 0, after: 0 };
-        }
-        traineeMap[email].data[tech][phase]++;
-      });
-    });
-
-    this.allTechnologies = Array.from(techSet).sort();
-
-    // Final formatted data
-    this.processedData = Object.values(traineeMap).map((entry: any) => {
-      const result: any = { trainee: entry.trainee };
-      this.allTechnologies.forEach(tech => {
-        ['before', 'during', 'after'].forEach(phase => {
-          const count = entry.data[tech]?.[phase] || 0;
-          const total = entry.total[phase] || 1;
-          result[`${tech}_${phase}`] = Math.round((count / total) * 100);
-        });
-      });
-      return result;
-    });
-  }
-
-  hasUptick(row: any, tech: string, phase: 'during' | 'after'): boolean {
-    const beforeVal = row[`${tech}_before`] || 0;
-    const phaseVal = row[`${tech}_${phase}`] || 0;
-    if (phase === 'during') return phaseVal > beforeVal;
-    if (phase === 'after') return phaseVal > row[`${tech}_during`] || phaseVal > beforeVal;
-    return false;
-  }
-}
