@@ -50,13 +50,19 @@ export class SkillUsageTableComponent implements OnChanges {
   };
 
   ngOnChanges(): void {
+    console.log('Live data chart load triggered...');
     if (this.stubMode) {
+      console.log('Stub mode enabled. Loading dummy chart data...');
       this.loadStubCharts();
       return;
     }
 
-    if (!this.commitData?.length) return;
+    if (!this.commitData?.length) {
+      console.warn('No commit data provided!');
+      return;
+    }
 
+    console.log('Commit data received:', this.commitData.length);
     const techSet = new Set<string>();
     const traineeMap: Record<string, any> = {};
 
@@ -75,7 +81,7 @@ export class SkillUsageTableComponent implements OnChanges {
       } else if (this.useFullAfterPeriod || month <= this.afterCutoff) {
         phase = 'after';
       } else {
-        continue; // skip anything beyond allowed range
+        continue;
       }
 
       const techsInCommit = new Set<string>();
@@ -110,6 +116,7 @@ export class SkillUsageTableComponent implements OnChanges {
     }
 
     this.allTechnologies = Array.from(techSet).sort();
+    console.log('Detected technologies:', this.allTechnologies);
 
     this.processedData = Object.values(traineeMap).map((entry: any) => {
       const result: any = { trainee: entry.trainee };
@@ -120,13 +127,13 @@ export class SkillUsageTableComponent implements OnChanges {
           result[`${tech}_${phase}`] = Math.round((count / total) * 100);
         });
       });
-      // add total per phase for tooltip support
       result[`total_before`] = entry.total.before || 0;
       result[`total_during`] = entry.total.during || 0;
       result[`total_after`] = entry.total.after || 0;
       return result;
     });
 
+    console.log('Processed rows:', this.processedData.length);
     this.prepareCharts();
   }
 
@@ -190,45 +197,43 @@ export class SkillUsageTableComponent implements OnChanges {
     const beforePercent = before.map(v => +(v / beforeTotal * 100).toFixed(2));
     const afterPercent = after.map(v => +(v / afterTotal * 100).toFixed(2));
 
-    this.generateCharts(categories, before, during, after, delta, beforePercent, afterPercent);
-  }
+    console.log('Chart Categories:', categories);
+    console.log('Before:', before);
+    console.log('After:', after);
+    console.log('Delta:', delta);
 
-  private generateCharts(categories: string[], before: number[], during: number[], after: number[], delta: number[], beforePercent: number[], afterPercent: number[]) {
-    const baseChartStyle = {
-      chart: { height: 500 },
-      xAxis: { categories, title: { text: null } },
-      yAxis: { min: 0, title: { text: 'Usage %' } },
-      tooltip: { shared: true, valueSuffix: '%' }
-    };
-
-    this.chartOptionsStacked = {
-      ...baseChartStyle,
-      chart: { ...baseChartStyle.chart, type: 'column' },
+    this.chartOptionsStacked = JSON.parse(JSON.stringify({
+      chart: { type: 'column', height: 500 },
       title: { text: 'Skill Usage per Phase (Stacked)', align: 'left' },
+      xAxis: { categories },
+      yAxis: { min: 0, title: { text: 'Usage %' } },
+      tooltip: { shared: true, valueSuffix: '%' },
       plotOptions: { column: { stacking: 'normal', dataLabels: { enabled: true } } },
       series: [
         { name: 'Before', data: before, type: 'column' },
         { name: 'During', data: during, type: 'column' },
         { name: 'After', data: after, type: 'column' }
       ]
-    };
+    }));
 
-    this.chartOptionsGrouped = {
-      ...baseChartStyle,
-      chart: { ...baseChartStyle.chart, type: 'column' },
+    this.chartOptionsGrouped = JSON.parse(JSON.stringify({
+      chart: { type: 'column', height: 500 },
       title: { text: 'Skill Usage per Phase (Grouped)', align: 'left' },
+      xAxis: { categories },
+      yAxis: { min: 0, title: { text: 'Usage %' } },
+      tooltip: { shared: true, valueSuffix: '%' },
       plotOptions: { column: { grouping: true, dataLabels: { enabled: true } } },
       series: [
         { name: 'Before', data: before, type: 'column' },
         { name: 'During', data: during, type: 'column' },
         { name: 'After', data: after, type: 'column' }
       ]
-    };
+    }));
 
-    this.chartOptionsDelta = {
+    this.chartOptionsDelta = JSON.parse(JSON.stringify({
       chart: { type: 'bar', height: 500 },
       title: { text: 'Skill Uptick (After - Before)', align: 'left' },
-      xAxis: { categories, title: { text: null } },
+      xAxis: { categories },
       yAxis: { title: { text: 'Uptick %' } },
       tooltip: { valueSuffix: '%' },
       plotOptions: {
@@ -237,9 +242,9 @@ export class SkillUsageTableComponent implements OnChanges {
         }
       },
       series: [{ name: 'Uptick', data: delta, type: 'bar' }]
-    };
+    }));
 
-    this.chartOptionsRadar = {
+    this.chartOptionsRadar = JSON.parse(JSON.stringify({
       chart: { polar: true, type: 'line', height: 500 },
       title: { text: 'Skill Mix Comparison (Radar)', align: 'left' },
       xAxis: { categories, tickmarkPlacement: 'on', lineWidth: 0 },
@@ -249,6 +254,6 @@ export class SkillUsageTableComponent implements OnChanges {
         { name: 'Before', data: beforePercent, type: 'line' },
         { name: 'After', data: afterPercent, type: 'line' }
       ]
-    };
+    }));
   }
 }
