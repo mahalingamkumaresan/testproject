@@ -1,0 +1,71 @@
+/* Table skill cell with border */
+.skill-cell {
+  border: 1px solid #ccc;
+  padding: 4px;
+  margin: 2px 0;
+  border-radius: 4px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+/* Uptick highlight */
+.uptick {
+  background-color: #d0f5d0 !important;
+  font-weight: bold;
+}
+
+/* Tooltip formatting */
+::ng-deep .p-tooltip-text {
+  white-space: pre-line;
+  font-size: 13px;
+  max-width: 250px;
+}
+
+/* Chart layout: 2 rows, 2 charts per row */
+.chart-container {
+  margin-top: 2rem;
+}
+
+.chart-row {
+  display: flex;
+  flex-wrap: wrap;
+  margin-bottom: 2rem;
+}
+
+.chart-box {
+  flex: 0 0 50%;
+  padding: 0 1rem;
+  box-sizing: border-box;
+}
+
+/* Legend formatting */
+.legend {
+  margin-top: 1rem;
+  font-size: 14px;
+}
+
+.legend ul {
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+}
+
+.legend li {
+  margin: 6px 0;
+}
+
+.highlight-box {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  background-color: #d0f5d0;
+  border: 1px solid #999;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+/* Fix for PrimeNG table paginator layout */
+::ng-deep .p-paginator {
+  margin-top: 1rem;
+  min-height: 40px;
+}
