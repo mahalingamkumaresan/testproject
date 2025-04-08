@@ -1,120 +1,141 @@
-<h3>Skill Uptick Visualizations</h3>
+this.chartOptionsRadar = {
+  chart: {
+    polar: true,
+    type: 'line',
+    height: 550,
+    width: 915
+  },
+  title: {
+    text: 'Skill Mix Comparison (Radar)',
+    align: 'left'
+  },
+  xAxis: {
+    categories: categories,
+    tickmarkPlacement: 'on',
+    lineWidth: 0
+  },
+  yAxis: {
+    gridLineInterpolation: 'polygon',
+    min: 0,
+    title: { text: '% Mix' }
+  },
+  tooltip: {
+    shared: true,
+    pointFormat: '<span>{series.name}</span>: <b>{point.y}%</b><br/>'
+  },
+  plotOptions: {
+    series: {
+      dataLabels: { enabled: true }
+    }
+  },
+  series: [
+    { name: 'Before', data: beforePercent, type: 'line' },
+    { name: 'After', data: afterPercent, type: 'line' }
+  ]
+};
 
-<div style="margin-bottom: 2rem;">
-  <highcharts-chart
-    [Highcharts]="Highcharts"
-    [options]="chartOptionsStacked"
-    style="width: 100%; height: 400px; display: block;"
-  ></highcharts-chart>
-</div>
+this.chartOptionsDelta = {
+  chart: {
+    type: 'bar',
+    height: 550,
+    width: 915
+  },
+  title: {
+    text: 'Skill Uptick (After - Before)',
+    align: 'left'
+  },
+  xAxis: {
+    categories: categories,
+    title: { text: null }
+  },
+  yAxis: {
+    min: 0,
+    title: { text: 'Uptick %' }
+  },
+  tooltip: {
+    valueSuffix: '%'
+  },
+  plotOptions: {
+    bar: {
+      dataLabels: {
+        enabled: true,
+        format: '{point.y:.0f}%'
+      }
+    }
+  },
+  series: [{
+    name: 'Uptick',
+    data: delta,
+    type: 'bar'
+  }]
+};
 
-<div style="margin-bottom: 2rem;">
-  <highcharts-chart
-    [Highcharts]="Highcharts"
-    [options]="chartOptionsGrouped"
-    style="width: 100%; height: 400px; display: block;"
-  ></highcharts-chart>
-</div>
+this.chartOptionsGrouped = {
+  chart: {
+    type: 'column',
+    height: 550,
+    width: 915
+  },
+  title: {
+    text: 'Skill Usage per Phase (Grouped)',
+    align: 'left'
+  },
+  xAxis: {
+    categories: categories,
+    title: { text: null }
+  },
+  yAxis: {
+    min: 0,
+    title: { text: 'Usage %' }
+  },
+  tooltip: {
+    shared: true,
+    valueSuffix: '%'
+  },
+  plotOptions: {
+    column: {
+      grouping: true,
+      dataLabels: { enabled: true }
+    }
+  },
+  series: [
+    { name: 'Before', data: before, type: 'column' },
+    { name: 'During', data: during, type: 'column' },
+    { name: 'After', data: after, type: 'column' }
+  ]
+};
 
-<div style="margin-bottom: 2rem;">
-  <highcharts-chart
-    [Highcharts]="Highcharts"
-    [options]="chartOptionsDelta"
-    style="width: 100%; height: 400px; display: block;"
-  ></highcharts-chart>
-</div>
-
-<div>
-  <highcharts-chart
-    [Highcharts]="Highcharts"
-    [options]="chartOptionsRadar"
-    style="width: 100%; height: 400px; display: block;"
-  ></highcharts-chart>
-</div>  
-
-
-prepareCharts(): void {
-  const totals: Record<string, { before: number, during: number, after: number }> = {};
-
-  this.processedData.forEach(row => {
-    this.allTechnologies.forEach(tech => {
-      if (!totals[tech]) totals[tech] = { before: 0, during: 0, after: 0 };
-      totals[tech].before += row[`${tech}_before`] || 0;
-      totals[tech].during += row[`${tech}_during`] || 0;
-      totals[tech].after += row[`${tech}_after`] || 0;
-    });
-  });
-
-  const categories = Object.keys(totals);
-  const before = categories.map(tech => totals[tech].before);
-  const during = categories.map(tech => totals[tech].during);
-  const after = categories.map(tech => totals[tech].after);
-  const delta = categories.map((tech, i) => after[i] - before[i]);
-
-  // Stacked Column
-  this.chartOptionsStacked = {
-    chart: { type: 'column' },
-    title: { text: 'Skill Usage per Phase (Stacked)' },
-    xAxis: { categories, crosshair: true },
-    yAxis: { min: 0, title: { text: 'Usage %' } },
-    tooltip: { shared: true },
-    plotOptions: { column: { stacking: 'normal' } },
-    series: [
-      { name: 'Before', data: before, type: 'column' },
-      { name: 'During', data: during, type: 'column' },
-      { name: 'After', data: after, type: 'column' }
-    ]
-  };
-
-  // Grouped Column
-  this.chartOptionsGrouped = {
-    chart: { type: 'column' },
-    title: { text: 'Skill Usage per Phase (Grouped)' },
-    xAxis: { categories, crosshair: true },
-    yAxis: { min: 0, title: { text: 'Usage %' } },
-    tooltip: { shared: true },
-    plotOptions: { column: { grouping: true } },
-    series: [
-      { name: 'Before', data: before, type: 'column' },
-      { name: 'During', data: during, type: 'column' },
-      { name: 'After', data: after, type: 'column' }
-    ]
-  };
-
-  // Delta Bar Chart
-  this.chartOptionsDelta = {
-    chart: { type: 'bar' },
-    title: { text: 'Skill Uptick (After - Before)' },
-    xAxis: { categories },
-    yAxis: { title: { text: 'Uptick %' } },
-    series: [{ name: 'Uptick', data: delta, type: 'bar' }]
-  };
-
-  // Radar Chart
-  const beforeTotal = before.reduce((a, b) => a + b, 0);
-  const afterTotal = after.reduce((a, b) => a + b, 0);
-  const beforePercent = before.map(v => +(v / beforeTotal * 100).toFixed(2));
-  const afterPercent = after.map(v => +(v / afterTotal * 100).toFixed(2));
-
-  this.chartOptionsRadar = {
-    chart: { polar: true, type: 'line' },
-    title: { text: 'Skill Mix Comparison (Radar)' },
-    xAxis: { categories, tickmarkPlacement: 'on', lineWidth: 0 },
-    yAxis: { gridLineInterpolation: 'polygon', min: 0, title: { text: '% Mix' } },
-    tooltip: { shared: true, pointFormat: '<span>{series.name}</span>: <b>{point.y}%</b><br/>' },
-    series: [
-      { name: 'Before', data: beforePercent, type: 'line' },
-      { name: 'After', data: afterPercent, type: 'line' }
-    ]
-  };
-}
-
-
-Highcharts: typeof Highcharts = Highcharts;
-chartOptionsStacked: Highcharts.Options = {};
-chartOptionsGrouped: Highcharts.Options = {};
-chartOptionsDelta: Highcharts.Options = {};
-chartOptionsRadar: Highcharts.Options = {};  
-
-
-this.prepareCharts();
+this.chartOptionsStacked = {
+  chart: {
+    type: 'column',
+    height: 550,
+    width: 915
+  },
+  title: {
+    text: 'Skill Usage per Phase (Stacked)',
+    align: 'left'
+  },
+  xAxis: {
+    categories: categories,
+    title: { text: null }
+  },
+  yAxis: {
+    min: 0,
+    title: { text: 'Usage %' }
+  },
+  tooltip: {
+    shared: true,
+    valueSuffix: '%'
+  },
+  plotOptions: {
+    column: {
+      stacking: 'normal',
+      dataLabels: { enabled: true }
+    }
+  },
+  series: [
+    { name: 'Before', data: before, type: 'column' },
+    { name: 'During', data: during, type: 'column' },
+    { name: 'After', data: after, type: 'column' }
+  ]
+};
