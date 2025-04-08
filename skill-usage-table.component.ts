@@ -1,5 +1,3 @@
-// File: skill-usage-table.component.ts
-
 import { Component, Input, OnChanges } from '@angular/core';
 import * as Highcharts from 'highcharts';
 
@@ -15,6 +13,7 @@ export class SkillUsageTableComponent implements OnChanges {
 
   processedData: any[] = [];
   allTechnologies: string[] = [];
+
   Highcharts: typeof Highcharts = Highcharts;
   chartOptionsStacked: Highcharts.Options = {};
   chartOptionsGrouped: Highcharts.Options = {};
@@ -23,94 +22,112 @@ export class SkillUsageTableComponent implements OnChanges {
 
   readonly trainingStart = '2024-04';
   readonly trainingEnd = '2024-07';
+  readonly afterCutoff = '2024-11';
 
   private readonly relevantTechMap: Record<string, string> = {
-    '.java': 'Java', '.ts': 'Angular', '.js': 'JavaScript',
-    '.html': 'HTML', '.css': 'Angular', '.scss': 'Angular',
-    '.jsx': 'React', '.tsx': 'React', '.xml': 'Spring',
-    '.yml': 'Spring', '.yaml': 'Spring', '.properties': 'Spring',
-    '.sql': 'Database', '.json': 'MongoDB', '.hql': 'Hadoop',
-    '.groovy': 'Jenkins', 'pom.xml': 'Maven', 'build.gradle': 'Gradle',
-    'Dockerfile': 'IAAS', 'Jenkinsfile': 'Jenkins',
-    '.spec.ts': 'Jest', '.test.ts': 'Jest'
+    '.java': 'Java',
+    '.ts': 'Angular',
+    '.js': 'JavaScript',
+    '.html': 'HTML',
+    '.css': 'Angular',
+    '.scss': 'Angular',
+    '.jsx': 'React',
+    '.tsx': 'React',
+    '.xml': 'Spring',
+    '.yml': 'Spring',
+    '.yaml': 'Spring',
+    '.properties': 'Spring',
+    '.sql': 'Database',
+    '.json': 'MongoDB',
+    '.hql': 'Hadoop',
+    '.groovy': 'Jenkins',
+    'pom.xml': 'Maven',
+    'build.gradle': 'Gradle',
+    'Dockerfile': 'IAAS',
+    'Jenkinsfile': 'Jenkins',
+    '.spec.ts': 'Jest',
+    '.test.ts': 'Jest'
   };
 
   ngOnChanges(): void {
-    setTimeout(() => {
-      if (this.stubMode) {
-        this.loadStubCharts();
-        return;
+    if (this.stubMode) {
+      this.loadStubCharts();
+      return;
+    }
+
+    if (!this.commitData?.length) return;
+
+    const techSet = new Set<string>();
+    const traineeMap: Record<string, any> = {};
+
+    for (const commit of this.commitData) {
+      const email = commit.AuthorEmail?.toLowerCase();
+      const month = commit.Month;
+      const fileList: string[] = commit.FileName?.split(',').map((f: string) => f.trim().toLowerCase()) || [];
+
+      if (!email || !month) continue;
+
+      let phase: 'before' | 'during' | 'after';
+      if (month < this.trainingStart) {
+        phase = 'before';
+      } else if (month <= this.trainingEnd) {
+        phase = 'during';
+      } else if (this.useFullAfterPeriod || month <= this.afterCutoff) {
+        phase = 'after';
+      } else {
+        continue; // skip anything beyond allowed range
       }
 
-      if (!this.commitData?.length) return;
-
-      const techSet = new Set<string>();
-      const traineeMap: Record<string, any> = {};
-
-      for (const commit of this.commitData) {
-        const email = commit.AuthorEmail?.toLowerCase();
-        const month = commit.Month;
-        const fileList = commit.FileName?.split(',').map((f: string) => f.trim().toLowerCase()) || [];
-
-        if (!email || !month) continue;
-
-        const phase: 'before' | 'during' | 'after' =
-          month < this.trainingStart ? 'before' :
-          month <= this.trainingEnd ? 'during' :
-          (this.useFullAfterPeriod || month <= '2024-11' ? 'after' : null);
-
-        if (!phase) continue;
-
-        const techsInCommit = new Set<string>();
-        for (const file of fileList) {
-          for (const ext in this.relevantTechMap) {
-            if (file.endsWith(ext)) {
-              const tech = this.relevantTechMap[ext].toLowerCase();
-              techsInCommit.add(tech);
-            }
+      const techsInCommit = new Set<string>();
+      for (const file of fileList) {
+        for (const ext in this.relevantTechMap) {
+          if (file.endsWith(ext)) {
+            const tech = this.relevantTechMap[ext].toLowerCase();
+            techsInCommit.add(tech);
           }
-        }
-
-        if (!techsInCommit.size) continue;
-
-        if (!traineeMap[email]) {
-          traineeMap[email] = {
-            trainee: email,
-            total: { before: 0, during: 0, after: 0 },
-            data: {}
-          };
-        }
-
-        traineeMap[email].total[phase]++;
-
-        for (const tech of techsInCommit) {
-          techSet.add(tech);
-          if (!traineeMap[email].data[tech]) {
-            traineeMap[email].data[tech] = { before: 0, during: 0, after: 0 };
-          }
-          traineeMap[email].data[tech][phase]++;
         }
       }
 
-      this.allTechnologies = Array.from(techSet).sort();
+      if (!techsInCommit.size) continue;
 
-      this.processedData = Object.values(traineeMap).map((entry: any) => {
-        const result: any = { trainee: entry.trainee };
-        this.allTechnologies.forEach(tech => {
-          ['before', 'during', 'after'].forEach(phase => {
-            const count = entry.data[tech]?.[phase] || 0;
-            const total = entry.total[phase] || 1;
-            result[`${tech}_${phase}`] = Math.round((count / total) * 100);
-          });
-          result[`total_before`] = entry.total.before;
-          result[`total_during`] = entry.total.during;
-          result[`total_after`] = entry.total.after;
+      if (!traineeMap[email]) {
+        traineeMap[email] = {
+          trainee: email,
+          total: { before: 0, during: 0, after: 0 },
+          data: {}
+        };
+      }
+
+      traineeMap[email].total[phase]++;
+
+      for (const tech of techsInCommit) {
+        techSet.add(tech);
+        if (!traineeMap[email].data[tech]) {
+          traineeMap[email].data[tech] = { before: 0, during: 0, after: 0 };
+        }
+        traineeMap[email].data[tech][phase]++;
+      }
+    }
+
+    this.allTechnologies = Array.from(techSet).sort();
+
+    this.processedData = Object.values(traineeMap).map((entry: any) => {
+      const result: any = { trainee: entry.trainee };
+      this.allTechnologies.forEach(tech => {
+        ['before', 'during', 'after'].forEach(phase => {
+          const count = entry.data[tech]?.[phase] || 0;
+          const total = entry.total[phase] || 1;
+          result[`${tech}_${phase}`] = Math.round((count / total) * 100);
         });
-        return result;
       });
+      // add total per phase for tooltip support
+      result[`total_before`] = entry.total.before || 0;
+      result[`total_during`] = entry.total.during || 0;
+      result[`total_after`] = entry.total.after || 0;
+      return result;
+    });
 
-      this.prepareCharts();
-    }, 2000); // Introduce 2-second delay
+    this.prepareCharts();
   }
 
   hasUptick(row: any, tech: string, phase: 'during' | 'after'): boolean {
@@ -137,5 +154,101 @@ export class SkillUsageTableComponent implements OnChanges {
     return `${tech.toUpperCase()}: ${percentage}% of commits\nRaw count: ${count} of ${total}${change}`;
   }
 
-  // loadStubCharts() and prepareCharts() remain as previously shared...
+  loadStubCharts() {
+    const categories = ['Java', 'Angular', 'Spring', 'MongoDB'];
+    const before = [20, 10, 5, 2];
+    const during = [40, 25, 10, 5];
+    const after = [60, 50, 25, 15];
+    const delta = after.map((v, i) => v - before[i]);
+    const beforeTotal = before.reduce((a, b) => a + b, 0);
+    const afterTotal = after.reduce((a, b) => a + b, 0);
+    const beforePercent = before.map(v => +(v / beforeTotal * 100).toFixed(2));
+    const afterPercent = after.map(v => +(v / afterTotal * 100).toFixed(2));
+
+    this.generateCharts(categories, before, during, after, delta, beforePercent, afterPercent);
+  }
+
+  prepareCharts(): void {
+    const totals: Record<string, { before: number, during: number, after: number }> = {};
+
+    this.processedData.forEach(row => {
+      this.allTechnologies.forEach(tech => {
+        if (!totals[tech]) totals[tech] = { before: 0, during: 0, after: 0 };
+        totals[tech].before += row[`${tech}_before`] || 0;
+        totals[tech].during += row[`${tech}_during`] || 0;
+        totals[tech].after += row[`${tech}_after`] || 0;
+      });
+    });
+
+    const categories = Object.keys(totals);
+    const before = categories.map(tech => totals[tech].before);
+    const during = categories.map(tech => totals[tech].during);
+    const after = categories.map(tech => totals[tech].after);
+    const delta = categories.map((_, i) => after[i] - before[i]);
+    const beforeTotal = before.reduce((a, b) => a + b, 0);
+    const afterTotal = after.reduce((a, b) => a + b, 0);
+    const beforePercent = before.map(v => +(v / beforeTotal * 100).toFixed(2));
+    const afterPercent = after.map(v => +(v / afterTotal * 100).toFixed(2));
+
+    this.generateCharts(categories, before, during, after, delta, beforePercent, afterPercent);
+  }
+
+  private generateCharts(categories: string[], before: number[], during: number[], after: number[], delta: number[], beforePercent: number[], afterPercent: number[]) {
+    const baseChartStyle = {
+      chart: { height: 500 },
+      xAxis: { categories, title: { text: null } },
+      yAxis: { min: 0, title: { text: 'Usage %' } },
+      tooltip: { shared: true, valueSuffix: '%' }
+    };
+
+    this.chartOptionsStacked = {
+      ...baseChartStyle,
+      chart: { ...baseChartStyle.chart, type: 'column' },
+      title: { text: 'Skill Usage per Phase (Stacked)', align: 'left' },
+      plotOptions: { column: { stacking: 'normal', dataLabels: { enabled: true } } },
+      series: [
+        { name: 'Before', data: before, type: 'column' },
+        { name: 'During', data: during, type: 'column' },
+        { name: 'After', data: after, type: 'column' }
+      ]
+    };
+
+    this.chartOptionsGrouped = {
+      ...baseChartStyle,
+      chart: { ...baseChartStyle.chart, type: 'column' },
+      title: { text: 'Skill Usage per Phase (Grouped)', align: 'left' },
+      plotOptions: { column: { grouping: true, dataLabels: { enabled: true } } },
+      series: [
+        { name: 'Before', data: before, type: 'column' },
+        { name: 'During', data: during, type: 'column' },
+        { name: 'After', data: after, type: 'column' }
+      ]
+    };
+
+    this.chartOptionsDelta = {
+      chart: { type: 'bar', height: 500 },
+      title: { text: 'Skill Uptick (After - Before)', align: 'left' },
+      xAxis: { categories, title: { text: null } },
+      yAxis: { title: { text: 'Uptick %' } },
+      tooltip: { valueSuffix: '%' },
+      plotOptions: {
+        bar: {
+          dataLabels: { enabled: true, format: '{point.y:.0f}%' }
+        }
+      },
+      series: [{ name: 'Uptick', data: delta, type: 'bar' }]
+    };
+
+    this.chartOptionsRadar = {
+      chart: { polar: true, type: 'line', height: 500 },
+      title: { text: 'Skill Mix Comparison (Radar)', align: 'left' },
+      xAxis: { categories, tickmarkPlacement: 'on', lineWidth: 0 },
+      yAxis: { gridLineInterpolation: 'polygon', min: 0, title: { text: '% Mix' } },
+      tooltip: { shared: true, pointFormat: '<span>{series.name}</span>: <b>{point.y}%</b><br/>' },
+      series: [
+        { name: 'Before', data: beforePercent, type: 'line' },
+        { name: 'After', data: afterPercent, type: 'line' }
+      ]
+    };
+  }
 }
