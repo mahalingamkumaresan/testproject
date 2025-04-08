@@ -1,100 +1,100 @@
-<!-- Table Title -->
-<h3>Skill Usage Across Trainees</h3>
+<div class="chart-container">
+  <!-- Row 1 -->
+  <div class="chart-row">
+    <div class="chart-half">
+      <highcharts-chart
+        *ngIf="chartOptionsStacked.series?.length"
+        [Highcharts]="Highcharts"
+        [options]="chartOptionsStacked"
+        style="width: 100%; height: 500px; display: block;">
+      </highcharts-chart>
+    </div>
+    <div class="chart-half">
+      <highcharts-chart
+        *ngIf="chartOptionsGrouped.series?.length"
+        [Highcharts]="Highcharts"
+        [options]="chartOptionsGrouped"
+        style="width: 100%; height: 500px; display: block;">
+      </highcharts-chart>
+    </div>
+  </div>
 
-<!-- PrimeNG Table with Paging, Tooltip, Bordered Skill Cells -->
+  <!-- Row 2 -->
+  <div class="chart-row">
+    <div class="chart-half">
+      <highcharts-chart
+        *ngIf="chartOptionsDelta.series?.length"
+        [Highcharts]="Highcharts"
+        [options]="chartOptionsDelta"
+        style="width: 100%; height: 500px; display: block;">
+      </highcharts-chart>
+    </div>
+    <div class="chart-half">
+      <highcharts-chart
+        *ngIf="chartOptionsRadar.series?.length"
+        [Highcharts]="Highcharts"
+        [options]="chartOptionsRadar"
+        style="width: 100%; height: 500px; display: block;">
+      </highcharts-chart>
+    </div>
+  </div>
+</div>
+
+<!-- Skill Usage Table -->
 <p-table
   *ngIf="processedData?.length"
   [value]="processedData"
   [paginator]="true"
   [rows]="10"
-  [rowsPerPageOptions]="[10, 20, 50]"
-  responsiveLayout="scroll"
-  styleClass="p-datatable-gridlines"
->
+  responsiveLayout="scroll">
   <ng-template pTemplate="header">
     <tr>
       <th>Trainee</th>
-      <th *ngFor="let tech of allTechnologies">{{ tech | titlecase }}</th>
+      <th *ngFor="let tech of allTechnologies">
+        <div class="tech-header">{{ tech.toUpperCase() }}</div>
+        <div class="tech-subheader">Before | During | After</div>
+      </th>
     </tr>
   </ng-template>
 
   <ng-template pTemplate="body" let-row>
     <tr>
       <td>{{ row.trainee }}</td>
-      <td *ngFor="let tech of allTechnologies">
-        <div class="skill-cell" [pTooltip]="getTooltip(row, tech, 'before')" tooltipPosition="top">
-          Before: {{ row[tech + '_before'] || 0 }}%
-        </div>
-        <div
-          class="skill-cell"
+      <td *ngFor="let tech of allTechnologies" class="skill-cell">
+        <span
+          class="phase"
+          [pTooltip]="getTooltip(row, tech, 'before')"
+          tooltipPosition="top">
+          {{ row[tech + '_before'] || 0 }}%
+        </span>
+        <span
+          class="phase"
           [ngClass]="{ 'uptick': hasUptick(row, tech, 'during') }"
           [pTooltip]="getTooltip(row, tech, 'during')"
-          tooltipPosition="top"
-        >
-          During: {{ row[tech + '_during'] || 0 }}%
-        </div>
-        <div
-          class="skill-cell"
+          tooltipPosition="top">
+          {{ row[tech + '_during'] || 0 }}%
+        </span>
+        <span
+          class="phase"
           [ngClass]="{ 'uptick': hasUptick(row, tech, 'after') }"
           [pTooltip]="getTooltip(row, tech, 'after')"
-          tooltipPosition="top"
-        >
-          After: {{ row[tech + '_after'] || 0 }}%
-        </div>
+          tooltipPosition="top">
+          {{ row[tech + '_after'] || 0 }}%
+        </span>
       </td>
     </tr>
   </ng-template>
 </p-table>
 
-<!-- Legend Section -->
+<!-- Legend -->
 <div class="legend">
-  <p><strong>Legend:</strong></p>
+  <h4>Legend</h4>
   <ul>
-    <li><span class="highlight-box"></span> Green indicates an uptick in usage vs previous phase.</li>
-    <li>Percentage = (Commits using tech / Total commits in phase) × 100</li>
-    <li>Training Phases:
-      <ul>
-        <li><strong>Before:</strong> Jan 2024 – Mar 2024</li>
-        <li><strong>During:</strong> Apr 2024 – Jul 2024</li>
-        <li><strong>After:</strong> Aug 2024 – Nov 2024 (default) or up to Mar 2025 (if full mode enabled)</li>
-      </ul>
-    </li>
-    <li>Only technologies part of Java Full Stack training are included.</li>
+    <li><strong>Before:</strong> Commits from Jan 2024 to Mar 2024</li>
+    <li><strong>During:</strong> Commits from Apr 2024 to Jul 2024</li>
+    <li><strong>After:</strong> Commits from Aug 2024 to Nov 2024 (or till Mar 2025 if flag enabled)</li>
+    <li><strong style="color: green;">Green Highlight:</strong> Indicates an uptick in percentage contribution</li>
+    <li><strong>% Value:</strong> Calculated as <code>(Technology Commits / Total Commits) * 100</code> for that phase</li>
+    <li><strong>Technologies Covered:</strong> Java, Angular, HTML, Spring, MongoDB, SQL, Jest, Jenkins, Docker, React, etc.</li>
   </ul>
-</div>
-
-<!-- Charts -->
-<div class="chart-container" *ngIf="!stubMode">
-  <div class="chart-row">
-    <div class="chart-box">
-      <highcharts-chart
-        [Highcharts]="Highcharts"
-        [options]="chartOptionsStacked"
-        style="width: 100%; height: 500px; display: block;"
-      ></highcharts-chart>
-    </div>
-    <div class="chart-box">
-      <highcharts-chart
-        [Highcharts]="Highcharts"
-        [options]="chartOptionsGrouped"
-        style="width: 100%; height: 500px; display: block;"
-      ></highcharts-chart>
-    </div>
-  </div>
-  <div class="chart-row">
-    <div class="chart-box">
-      <highcharts-chart
-        [Highcharts]="Highcharts"
-        [options]="chartOptionsDelta"
-        style="width: 100%; height: 500px; display: block;"
-      ></highcharts-chart>
-    </div>
-    <div class="chart-box">
-      <highcharts-chart
-        [Highcharts]="Highcharts"
-        [options]="chartOptionsRadar"
-        style="width: 100%; height: 500px; display: block;"
-      ></highcharts-chart>
-    </div>
-  </div>
 </div>
