@@ -1,46 +1,111 @@
-interface SkillGapByRole {
-  [role: string]: {
-    yes: Set<string>;
-    no: Set<string>;
-  };
-}
+<app-skill-usage-table [commitData]="bitbucketData"></app-skill-usage-table>
 
-const skillGapMap: SkillGapByRole = {};
+<table border="1" *ngIf="processedData.length > 0">
+  <thead>
+    <tr>
+      <th>Trainee</th>
+      <th colspan="3">Java</th>
+      <th colspan="3">Angular</th>
+      <th colspan="3">HTML</th>
+    </tr>
+    <tr>
+      <th></th>
+      <th>Before</th>
+      <th>During</th>
+      <th>After</th>
+      <th>Before</th>
+      <th>During</th>
+      <th>After</th>
+      <th>Before</th>
+      <th>During</th>
+      <th>After</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr *ngFor="let row of processedData">
+      <td>{{ row.trainee }}</td>
+      <td>{{ row.javaBefore }}%</td>
+      <td>{{ row.javaDuring }}%</td>
+      <td>{{ row.javaAfter }}%</td>
+      <td>{{ row.angularBefore }}%</td>
+      <td>{{ row.angularDuring }}%</td>
+      <td>{{ row.angularAfter }}%</td>
+      <td>{{ row.htmlBefore }}%</td>
+      <td>{{ row.htmlDuring }}%</td>
+      <td>{{ row.htmlAfter }}%</td>
+    </tr>
+  </tbody>
+</table>
 
-this.InputFilterData.forEach(item => {
-  const email = item.AuthorEmail;
-  const role = item.empRole?.trim() || 'Unknown';
-  const skillGap = item.SkillGap?.toString().trim().toLowerCase();
+import { Component, Input, OnChanges } from '@angular/core';
 
-  if (!skillGapMap[role]) {
-    skillGapMap[role] = { yes: new Set(), no: new Set() };
-  }
+@Component({
+  selector: 'app-skill-usage-table',
+  templateUrl: './skill-usage-table.component.html'
+})
+export class SkillUsageTableComponent implements OnChanges {
+  @Input() commitData: any[] = [];
 
-  if (skillGap === 'yes') {
-    skillGapMap[role].yes.add(email);
-  } else if (skillGap === 'no' || skillGap === '' || skillGap === 'na' || skillGap === null) {
-    skillGapMap[role].no.add(email);
-  }
-});
-onRoleChange(selectedRole: string) {
-  if (selectedRole === 'all') {
-    let totalYes = 0;
-    let totalNo = 0;
-    for (const role of this.roleOptions) {
-      totalYes += this.skillGapMap[role]?.yes.size || 0;
-      totalNo += this.skillGapMap[role]?.no.size || 0;
+  processedData: any[] = [];
+
+  readonly trainingStart = '2024-04';
+  readonly trainingEnd = '2024-07';
+
+  ngOnChanges() {
+    if (this.commitData?.length) {
+      const traineeMap: Record<string, any> = {};
+
+      this.commitData.forEach(commit => {
+        const email = commit.AuthorEmail?.toLowerCase();
+        const month = commit.Month;
+        const technologies = commit.Technology?.split(',').map((t: string) => t.trim()) || [];
+
+        if (!email || !month) return;
+
+        let phase: 'before' | 'during' | 'after';
+        if (month < this.trainingStart) phase = 'before';
+        else if (month <= this.trainingEnd) phase = 'during';
+        else phase = 'after';
+
+        if (!traineeMap[email]) {
+          traineeMap[email] = {
+            trainee: email,
+            javaBefore: 0, javaDuring: 0, javaAfter: 0,
+            angularBefore: 0, angularDuring: 0, angularAfter: 0,
+            htmlBefore: 0, htmlDuring: 0, htmlAfter: 0,
+            totalBefore: 0, totalDuring: 0, totalAfter: 0,
+          };
+        }
+
+        technologies.forEach(tech => {
+          const lowerTech = tech.toLowerCase();
+          const target = traineeMap[email];
+
+          if (phase === 'before') target.totalBefore++;
+          if (phase === 'during') target.totalDuring++;
+          if (phase === 'after') target.totalAfter++;
+
+          if (lowerTech.includes('java')) target[`java${this.capitalize(phase)}`]++;
+          if (lowerTech.includes('angular')) target[`angular${this.capitalize(phase)}`]++;
+          if (lowerTech.includes('html')) target[`html${this.capitalize(phase)}`]++;
+        });
+      });
+
+      // Convert counts to percentages
+      this.processedData = Object.values(traineeMap).map((entry: any) => {
+        ['java', 'angular', 'html'].forEach(skill => {
+          ['Before', 'During', 'After'].forEach(phase => {
+            const totalKey = `total${phase}`;
+            const skillKey = `${skill}${phase}`;
+            entry[skillKey] = entry[totalKey] ? Math.round((entry[skillKey] / entry[totalKey]) * 100) : 0;
+          });
+        });
+        return entry;
+      });
     }
-
-    this.updateChart(totalYes, totalNo);
-  } else {
-    const roleData = this.skillGapMap[selectedRole] || { yes: new Set(), no: new Set() };
-    this.updateChart(roleData.yes.size, roleData.no.size);
   }
-}
 
-updateChart(yes: number, no: number) {
-  this.chart.series[0].setData([
-    { name: 'Skill Gap = Yes', y: yes },
-    { name: 'Skill Gap = No', y: no }
-  ]);
+  private capitalize(text: string): string {
+    return text.charAt(0).toUpperCase() + text.slice(1);
+  }
 }
