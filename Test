@@ -152,3 +152,31 @@ export class SkillUsageTableComponent implements OnChanges {
     </li>
   </ul>
 </div>
+
+.uptick {
+  background-color: #d0f5d0 !important;
+}
+
+.legend {
+  margin-top: 1rem;
+  font-size: 14px;
+}
+
+.legend ul {
+  list-style: none;
+  padding-left: 0;
+}
+
+.legend li {
+  margin: 6px 0;
+}
+
+.highlight-box {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  background-color: #d0f5d0;
+  border: 1px solid #999;
+  margin-right: 8px;
+  vertical-align: middle;
+}
