@@ -1,0 +1,11 @@
+/* new-adoption-chart.component.css
+   Version: 1.0 - Styling for the New Adoption Chart Component */
+
+:host {
+  display: block;
+  margin: 20px;
+}
+
+.highcharts-container {
+  width: 100%;
+}
