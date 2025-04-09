@@ -1,40 +1,26 @@
-.tech-header {
-  font-weight: bold;
-  text-align: center;
-}
-
-.tech-subheader {
-  font-size: 12px;
-  text-align: center;
-  color: gray;
-}
-
 .skill-cell {
-  display: flex;
-  justify-content: space-evenly;
   border: 1px solid #ccc;
-  padding: 5px;
-}
-
-.phase {
-  padding: 0 4px;
+  padding: 4px;
+  margin-bottom: 4px;
+  border-radius: 4px;
 }
 
 .uptick {
-  background-color: #c8f7c5;
+  background-color: #c5f7c5;
   font-weight: bold;
 }
 
 .legend {
-  margin-top: 30px;
+  margin-top: 20px;
   font-size: 14px;
-  line-height: 1.6;
 }
 
 .legend ul {
   padding-left: 20px;
 }
 
-.legend li {
-  margin-bottom: 5px;
+.legend-uptick {
+  background-color: #c5f7c5;
+  padding: 2px 6px;
+  border-radius: 3px;
 }
