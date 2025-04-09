@@ -1,46 +1,124 @@
-<p-table
-  *ngIf="processedData.length"
-  [value]="processedData"
-  [paginator]="true"
-  [rows]="10"
-  [rowsPerPageOptions]="[100, 200, 500]"
-  responsiveLayout="scroll"
-  styleClass="p-datatable-gridlines"
->
-  <ng-template pTemplate="header">
-    <tr>
-      <th>Trainee</th>
-      <th *ngFor="let tech of allTechnologies">{{ tech | titlecase }}</th>
-    </tr>
-  </ng-template>
+import { Component, Input, OnChanges, SimpleChanges } from '@angular/core';
+import * as Highcharts from 'highcharts';
 
-  <ng-template pTemplate="body" let-row>
-    <tr>
-      <td>{{ row.trainee }}</td>
-      <td *ngFor="let tech of allTechnologies">
-        <div class="skill-cell" [pTooltip]="getTooltip(row, tech, 'before')" tooltipPosition="top">
-          Before: {{ row[tech]?.before || 0 }}
-        </div>
-        <div class="skill-cell" [ngClass]="{ 'uptick': hasUptick(row, tech, 'during') }"
-             [pTooltip]="getTooltip(row, tech, 'during')" tooltipPosition="top">
-          During: {{ row[tech]?.during || 0 }}
-        </div>
-        <div class="skill-cell" [ngClass]="{ 'uptick': hasUptick(row, tech, 'after') }"
-             [pTooltip]="getTooltip(row, tech, 'after')" tooltipPosition="top">
-          After: {{ row[tech]?.after || 0 }}
-        </div>
-      </td>
-    </tr>
-  </ng-template>
-</p-table>
+@Component({
+  selector: 'app-skill-usage-table',
+  templateUrl: './app-skill-usage-table.component.html',
+  styleUrls: ['./app-skill-usage-table.component.css']
+})
+export class SkillUsageTableComponent implements OnChanges {
+  @Input() commitData: any[] = [];
+  @Input() stub = false;
+  @Input() showUntilMarch = false;
 
-<div class="legend">
-  <p><strong>Legend:</strong></p>
-  <ul>
-    <li><strong>Before:</strong> Jan 2024 – Mar 2024</li>
-    <li><strong>During:</strong> Apr 2024 – Jul 2024</li>
-    <li><strong>After:</strong> Aug 2024 – Nov 2024 (or till Mar 2025 if flag enabled)</li>
-    <li><span class="legend-uptick">Green Highlight</span>: Increase in contribution compared to 'Before'</li>
-    <li>Tooltip shows % contribution to total commits involving that skill</li>
-  </ul>
-</div>
+  readonly trainingStart = '2024-04';
+  readonly trainingEnd = '2024-07';
+  readonly afterDefaultStart = '2024-08';
+  readonly afterFullStart = '2024-08';
+  readonly afterFullEnd = '2025-03';
+
+  allTechnologies: string[] = [];
+  processedData: any[] = [];
+  isLoading = true;
+
+  readonly javaFullStackTechnologies = [
+    'html', 'js', 'typescript', 'core java', 'advance java',
+    'angular', 'react', 'jest', 'swagger', 'rest', 'spring boot',
+    'mssql', 'oracle', 'mongodb', 'nosql', 'hadoop', 'junit',
+    'hibernate', 'jpa', 'kafka', 'openshift', 'sast',
+    'spring security', 'jenkins', 'maven', 'gradle'
+  ];
+
+  readonly fileExtensionToTechMap: Record<string, string> = {
+    ts: 'typescript',
+    js: 'js',
+    html: 'html',
+    java: 'java',
+    py: 'python',
+    xml: 'spring',
+    json: 'swagger',
+    sql: 'database',
+    yml: 'jenkins',
+    css: 'styles',
+    md: 'documentation',
+    gradle: 'gradle',
+    hbm: 'hibernate',
+    jsx: 'react',
+    test: 'jest'
+  };
+
+  ngOnChanges(changes: SimpleChanges): void {
+    if (!this.commitData?.length) return;
+
+    this.isLoading = true;
+
+    const filteredCommits = this.commitData.map(commit => {
+      const extensions = commit.FileName?.split(',') || [];
+      const techs = new Set<string>();
+
+      extensions.forEach((file: string) => {
+        const ext = file.split('.').pop()?.trim().toLowerCase();
+        const tech = this.fileExtensionToTechMap[ext || ''];
+        if (tech && this.javaFullStackTechnologies.includes(tech)) {
+          techs.add(tech);
+        }
+      });
+
+      return {
+        ...commit,
+        technologies: Array.from(techs),
+        month: commit.Month
+      };
+    }).filter(c => c.technologies.length > 0);
+
+    const grouped: Record<string, any> = {};
+
+    filteredCommits.forEach(commit => {
+      const author = commit.AuthorName || 'Unknown';
+      if (!grouped[author]) {
+        grouped[author] = { trainee: author };
+      }
+
+      commit.technologies.forEach((tech: string) => {
+        const key = this.getPhase(commit.month);
+        const obj = grouped[author][tech] || { before: 0, during: 0, after: 0 };
+        obj[key]++;
+        grouped[author][tech] = obj;
+      });
+    });
+
+    this.processedData = Object.values(grouped);
+    this.allTechnologies = this.getAllRelevantTechs(this.processedData);
+    this.isLoading = false;
+  }
+
+  getAllRelevantTechs(data: any[]): string[] {
+    const techSet = new Set<string>();
+    data.forEach(row => {
+      Object.keys(row).forEach(key => {
+        if (['trainee'].includes(key)) return;
+        techSet.add(key);
+      });
+    });
+    return Array.from(techSet);
+  }
+
+  getPhase(month: string): 'before' | 'during' | 'after' {
+    if (month < this.trainingStart) return 'before';
+    if (month >= this.trainingStart && month <= this.trainingEnd) return 'during';
+    if (!this.showUntilMarch && month > '2024-11') return 'ignore';
+    return 'after';
+  }
+
+  hasUptick(row: any, tech: string, phase: 'before' | 'during' | 'after'): boolean {
+    if (phase === 'before') return false;
+    return (row[tech]?.[phase] || 0) > (row[tech]?.before || 0);
+  }
+
+  getTooltip(row: any, tech: string, phase: 'before' | 'during' | 'after'): string {
+    const value = row[tech]?.[phase] || 0;
+    const total = Object.values(row[tech] || {}).reduce((acc: number, v: number) => acc + v, 0);
+    const percentage = total ? ((value / total) * 100).toFixed(1) : '0';
+    return `Commits: ${value} (${percentage}%)`;
+  }
+}
