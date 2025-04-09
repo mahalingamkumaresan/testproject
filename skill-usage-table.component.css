@@ -1,18 +1,3 @@
-.chart-container {
-  margin-bottom: 2rem;
-}
-
-.chart-row {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  margin-bottom: 2rem;
-}
-
-.chart-half {
-  flex: 0 0 49%;
-}
-
 .tech-header {
   font-weight: bold;
   text-align: center;
