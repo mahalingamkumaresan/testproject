@@ -1,26 +1,33 @@
+.chart-container {
+  margin-bottom: 2rem;
+}
+
 .skill-cell {
+  display: flex;
+  justify-content: space-evenly;
   border: 1px solid #ccc;
-  padding: 4px;
-  margin-bottom: 4px;
-  border-radius: 4px;
+  padding: 5px;
 }
 
 .uptick {
-  background-color: #c5f7c5;
+  background-color: #c8f7c5;
   font-weight: bold;
 }
 
+.nochange {
+  background-color: #f5f5f5;
+}
+
 .legend {
-  margin-top: 20px;
+  margin-top: 30px;
   font-size: 14px;
+  line-height: 1.6;
 }
 
 .legend ul {
   padding-left: 20px;
 }
 
-.legend-uptick {
-  background-color: #c5f7c5;
-  padding: 2px 6px;
-  border-radius: 3px;
+.legend li {
+  margin-bottom: 5px;
 }
