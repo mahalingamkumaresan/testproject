@@ -1,5 +1,6 @@
-import { Component, Input, OnChanges, SimpleChanges } from '@angular/core';
+import { Component, Input, OnChanges } from '@angular/core';
 import * as Highcharts from 'highcharts';
+import { BBdataService } from '../../../services/BBData.service';
 
 @Component({
   selector: 'app-skill-usage-table',
@@ -8,117 +9,191 @@ import * as Highcharts from 'highcharts';
 })
 export class SkillUsageTableComponent implements OnChanges {
   @Input() commitData: any[] = [];
-  @Input() stub = false;
-  @Input() showUntilMarch = false;
+  @Input() stubMode = false;
+  @Input() useFullAfterPeriod = false;
+
+  processedData: any[] = [];
+  allTechnologies: string[] = [];
+
+  Highcharts: typeof Highcharts = Highcharts;
+  chartOptionsRadar: Highcharts.Options = {};
 
   readonly trainingStart = '2024-04';
   readonly trainingEnd = '2024-07';
-  readonly afterDefaultStart = '2024-08';
-  readonly afterFullStart = '2024-08';
-  readonly afterFullEnd = '2025-03';
+  readonly afterCutoff = '2024-11';
 
-  allTechnologies: string[] = [];
-  processedData: any[] = [];
-  isLoading = true;
-
-  readonly javaFullStackTechnologies = [
-    'html', 'js', 'typescript', 'core java', 'advance java',
-    'angular', 'react', 'jest', 'swagger', 'rest', 'spring boot',
-    'mssql', 'oracle', 'mongodb', 'nosql', 'hadoop', 'junit',
-    'hibernate', 'jpa', 'kafka', 'openshift', 'sast',
-    'spring security', 'jenkins', 'maven', 'gradle'
-  ];
-
-  readonly fileExtensionToTechMap: Record<string, string> = {
-    ts: 'typescript',
-    js: 'js',
-    html: 'html',
-    java: 'java',
-    py: 'python',
-    xml: 'spring',
-    json: 'swagger',
-    sql: 'database',
-    yml: 'jenkins',
-    css: 'styles',
-    md: 'documentation',
-    gradle: 'gradle',
-    hbm: 'hibernate',
-    jsx: 'react',
-    test: 'jest'
+  private readonly relevantTechMap: Record<string, string> = {
+    '.java': 'Java', '.ts': 'Angular', '.js': 'JavaScript', '.html': 'HTML', '.css': 'Angular',
+    '.jsx': 'React', '.tsx': 'React', '.xml': 'Spring', '.yml': 'Spring', '.properties': 'Spring',
+    '.sql': 'Database', '.json': 'MongoDB', '.spec.ts': 'Jest', '.test.ts': 'Jest',
+    '.gradle': 'Gradle', '.dockerfile': 'IAAS', 'pom.xml': 'Maven'
   };
 
-  ngOnChanges(changes: SimpleChanges): void {
-    if (!this.commitData?.length) return;
+  constructor(private bbdataService: BBdataService) {}
 
-    this.isLoading = true;
+  ngOnChanges(): void {
+    console.log('Live data chart load triggered...');
+    if (this.stubMode) {
+      console.log('Stub mode enabled. Loading dummy chart data...');
+      this.loadStubCharts();
+      return;
+    }
 
-    const filteredCommits = this.commitData.map(commit => {
-      const extensions = commit.FileName?.split(',') || [];
-      const techs = new Set<string>();
-
-      extensions.forEach((file: string) => {
-        const ext = file.split('.').pop()?.trim().toLowerCase();
-        const tech = this.fileExtensionToTechMap[ext || ''];
-        if (tech && this.javaFullStackTechnologies.includes(tech)) {
-          techs.add(tech);
+    if (!this.commitData?.length) {
+      this.bbdataService.bbdata$.subscribe(data => {
+        if (data) {
+          this.commitData = data;
         }
       });
+    }
 
-      return {
-        ...commit,
-        technologies: Array.from(techs),
-        month: commit.Month
-      };
-    }).filter(c => c.technologies.length > 0);
+    console.log('Commit data received:', this.commitData.length);
+    const techSet = new Set<string>();
+    const traineeMap: Record<string, any> = {};
 
-    const grouped: Record<string, any> = {};
+    for (const commit of this.commitData) {
+      const email = commit.AuthorEmail?.toLowerCase();
+      const month = commit.Month;
+      const fileList: string[] = commit.FileName?.split('.').map(f => f.trim().toLowerCase()) || [];
+      if (!email || !month) continue;
 
-    filteredCommits.forEach(commit => {
-      const author = commit.AuthorName || 'Unknown';
-      if (!grouped[author]) {
-        grouped[author] = { trainee: author };
+      let phase = '';
+      if (month < this.trainingStart) phase = 'before';
+      else if (month < this.trainingEnd) phase = 'during';
+      else if (this.useFullAfterPeriod || month <= this.afterCutoff) phase = 'after';
+      else continue;
+
+      const techsInCommit = new Set<string>();
+      for (const ext in this.relevantTechMap) {
+        if (fileList.includes(ext)) {
+          const tech = this.relevantTechMap[ext].toLowerCase();
+          techsInCommit.add(tech);
+        }
       }
 
-      commit.technologies.forEach((tech: string) => {
-        const key = this.getPhase(commit.month);
-        const obj = grouped[author][tech] || { before: 0, during: 0, after: 0 };
-        obj[key]++;
-        grouped[author][tech] = obj;
+      if (!techsInCommit.size) continue;
+
+      if (!traineeMap[email]) {
+        traineeMap[email] = { trainee: email, total: { before: 0, during: 0, after: 0 }, data: {} };
+      }
+
+      traineeMap[email].total[phase]++;
+      for (const tech of techsInCommit) {
+        techSet.add(tech);
+        if (!traineeMap[email].data[tech]) {
+          traineeMap[email].data[tech] = { before: 0, during: 0, after: 0 };
+        }
+        traineeMap[email].data[tech][phase]++;
+      }
+    }
+
+    this.allTechnologies = Array.from(techSet).sort();
+    console.log('Detected technologies:', this.allTechnologies);
+
+    this.processedData = Object.values(traineeMap).map((entry: any) => {
+      const result: any = { trainee: entry.trainee };
+      this.allTechnologies.forEach(tech => {
+        ['before', 'during', 'after'].forEach(phase => {
+          const count = entry.data[tech]?.[phase] || 0;
+          const total = entry.total[phase] || 1;
+          result[`${tech}_${phase}`] = Math.round((count / total) * 100);
+        });
       });
+      result.total_before = entry.total.before || 0;
+      result.total_during = entry.total.during || 0;
+      result.total_after = entry.total.after || 0;
+      return result;
     });
 
-    this.processedData = Object.values(grouped);
-    this.allTechnologies = this.getAllRelevantTechs(this.processedData);
-    this.isLoading = false;
+    console.log('Processed rows:', this.processedData.length);
+    this.prepareCharts();
   }
 
-  getAllRelevantTechs(data: any[]): string[] {
-    const techSet = new Set<string>();
-    data.forEach(row => {
-      Object.keys(row).forEach(key => {
-        if (['trainee'].includes(key)) return;
-        techSet.add(key);
-      });
-    });
-    return Array.from(techSet);
-  }
-
-  getPhase(month: string): 'before' | 'during' | 'after' {
-    if (month < this.trainingStart) return 'before';
-    if (month >= this.trainingStart && month <= this.trainingEnd) return 'during';
-    if (!this.showUntilMarch && month > '2024-11') return 'ignore';
-    return 'after';
-  }
-
-  hasUptick(row: any, tech: string, phase: 'before' | 'during' | 'after'): boolean {
-    if (phase === 'before') return false;
-    return (row[tech]?.[phase] || 0) > (row[tech]?.before || 0);
+  hasUptick(row: any, tech: string, phase: 'during' | 'after'): boolean {
+    const before = row[`${tech}_before`] || 0;
+    const during = row[`${tech}_during`] || 0;
+    const after = row[`${tech}_after`] || 0;
+    return phase === 'during' ? during > before : after > during || after > before;
   }
 
   getTooltip(row: any, tech: string, phase: 'before' | 'during' | 'after'): string {
-    const value = row[tech]?.[phase] || 0;
-    const total = Object.values(row[tech] || {}).reduce((acc: number, v: number) => acc + v, 0);
-    const percentage = total ? ((value / total) * 100).toFixed(1) : '0';
-    return `Commits: ${value} (${percentage}%)`;
+    const percentage = row[`${tech}_${phase}`] || 0;
+    const total = row[`total_${phase}`] || 0;
+    const count = Math.round((percentage / 100) * total);
+
+    let change = '';
+    if (phase !== 'before') {
+      const prevPhase = phase === 'during' ? 'before' : 'during';
+      const prev = row[`${tech}_${prevPhase}`] || 0;
+      const delta = percentage - prev;
+      const symbol = delta > 0 ? '+' : '';
+      change = `\nChange from ${prevPhase}: ${symbol}${delta}%`;
+    }
+
+    return `${tech.toUpperCase()}: ${percentage}% of commits\nRaw count: ${count} of ${total}${change}`;
+  }
+
+  prepareCharts(): void {
+    const totals: Record<string, { before: number, during: number, after: number }> = {};
+    this.processedData.forEach(row => {
+      this.allTechnologies.forEach(tech => {
+        if (!totals[tech]) totals[tech] = { before: 0, during: 0, after: 0 };
+        totals[tech].before += row[`${tech}_before`] || 0;
+        totals[tech].during += row[`${tech}_during`] || 0;
+        totals[tech].after += row[`${tech}_after`] || 0;
+      });
+    });
+
+    const categories = Object.keys(totals);
+    const before = categories.map(tech => totals[tech].before);
+    const during = categories.map(tech => totals[tech].during);
+    const after = categories.map(tech => totals[tech].after);
+
+    const beforeTotal = before.reduce((a, b) => a + b, 0);
+    const afterTotal = after.reduce((a, b) => a + b, 0);
+    const beforePercent = before.map(v => +((v / beforeTotal) * 100).toFixed(2));
+    const duringPercent = during.map(v => +((v / beforeTotal) * 100).toFixed(2));
+    const afterPercent = after.map(v => +((v / afterTotal) * 100).toFixed(2));
+
+    this.chartOptionsRadar = {
+      chart: { polar: true, type: 'line', height: 500 },
+      title: { text: 'Skill Mix Comparison (Radar)', align: 'left' },
+      xAxis: { categories, tickmarkPlacement: 'on', lineWidth: 0 },
+      yAxis: {
+        gridLineInterpolation: 'polygon',
+        min: 0,
+        title: { text: '% Mix' }
+      },
+      tooltip: {
+        shared: true,
+        formatter: function () {
+          return `<span style="font-weight:bold">${this.x}</span><br/>` +
+            this.points!.map(p => `<span>${p.series.name}</span>: <b>${p.y}%</b><br/>`).join('');
+        }
+      },
+      series: [
+        { name: 'Before', data: beforePercent, type: 'line', pointPlacement: 'on' },
+        { name: 'During', data: duringPercent, type: 'line', pointPlacement: 'on' },
+        { name: 'After', data: afterPercent, type: 'line', pointPlacement: 'on' }
+      ]
+    };
+  }
+
+  loadStubCharts(): void {
+    this.chartOptionsRadar = {
+      chart: { polar: true, type: 'line', height: 500 },
+      title: { text: 'Skill Mix Comparison (Radar)', align: 'left' },
+      xAxis: { categories: ['Java', 'Angular', 'Spring', 'MongoDB'], tickmarkPlacement: 'on', lineWidth: 0 },
+      yAxis: {
+        gridLineInterpolation: 'polygon',
+        min: 0,
+        title: { text: '% Mix' }
+      },
+      series: [
+        { name: 'Before', data: [30, 20, 25, 15], type: 'line', pointPlacement: 'on' },
+        { name: 'During', data: [35, 30, 28, 20], type: 'line', pointPlacement: 'on' },
+        { name: 'After', data: [40, 33, 30, 25], type: 'line', pointPlacement: 'on' }
+      ]
+    };
   }
 }
