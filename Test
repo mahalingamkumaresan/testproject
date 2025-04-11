@@ -1,67 +1,107 @@
-/* Add border around each skill cell */
-td > div {
-  border: 1px solid #ccc;
-  padding: 4px;
-  border-radius: 4px;
-  font-size: 14px;
-  line-height: 1.4;
+import { Component, Input, OnInit } from '@angular/core';
+import * as Highcharts from 'highcharts';
+import HC_more from 'highcharts/highcharts-more';
+HC_more(Highcharts); // Initialize gauge features
+
+@Component({
+  selector: 'app-weighted-gauge',
+  templateUrl: './weighted-gauge.component.html',
+  styleUrls: ['./weighted-gauge.component.css']
+})
+export class WeightedGaugeComponent implements OnInit {
+  // Expecting each user to have a 'commits' object, e.g., { java: number, css: number, html: number, ... }
+  @Input() user: any;
+  
+  Highcharts: typeof Highcharts = Highcharts;
+  chartOptions: Highcharts.Options;
+  
+  weightedScore: number;
+
+  ngOnInit(): void {
+    this.weightedScore = this.calculateWeightedScore(this.user.commits);
+    this.initChart();
+  }
+
+  calculateWeightedScore(commits: any): number {
+    // Define the weights for each skill
+    const weights = {
+      java: 0.6,
+      css: 0.05,
+      html: 0.05
+      // Add additional skills and their corresponding weights as needed
+    };
+    let weightedSum = 0;
+    let totalWeight = 0;
+    for (const skill in weights) {
+      if (weights.hasOwnProperty(skill)) {
+        weightedSum += (commits[skill] || 0) * weights[skill];
+        totalWeight += weights[skill];
+      }
+    }
+    // If totalWeight sums to 1 (or you want to normalize), simply return the weightedSum
+    return totalWeight > 0 ? weightedSum / totalWeight : 0;
+  }
+
+  initChart(): void {
+    this.chartOptions = {
+      chart: {
+        type: 'gauge',
+        plotBackgroundColor: null,
+        plotBorderWidth: 0,
+        plotShadow: false,
+        height: 120,
+        width: 120
+      },
+      title: {
+        text: null
+      },
+      pane: {
+        startAngle: -150,
+        endAngle: 150
+      },
+      yAxis: {
+        min: 0,
+        max: 100,
+        title: {
+          text: 'Score'
+        },
+        plotBands: [{
+          from: 0,
+          to: 50,
+          color: '#DF5353' // red
+        }, {
+          from: 50,
+          to: 75,
+          color: '#DDDF0D' // yellow
+        }, {
+          from: 75,
+          to: 100,
+          color: '#55BF3B' // green
+        }]
+      },
+      series: [{
+        name: 'Score',
+        type: 'gauge',
+        data: [this.weightedScore],
+        tooltip: {
+          valueSuffix: ' pts'
+        }
+      }],
+      credits: {
+        enabled: false
+      }
+    };
+  }
 }
 
-/* Highlight upticks in green */
-td > div > div {
-  padding: 2px 4px;
-}
+<highcharts-chart 
+  [Highcharts]="Highcharts"
+  [options]="chartOptions"
+  style="width: 120px; height: 120px; display: block;">
+</highcharts-chart>
 
-td > div > div:nth-child(2), /* During */
-td > div > div:nth-child(3)  /* After */ {
-  transition: background-color 0.3s ease;
-}
-
-/* Style for green highlight applied via ngStyle/ngClass */
-td > div > div[style*="lightgreen"] {
-  background-color: #d0f5d0 !important;
-  font-weight: bold;
-}
-
-/* Legend styles */
-.legend {
-  margin-top: 1rem;
-  font-size: 14px;
-}
-
-.legend ul {
-  list-style: none;
-  padding-left: 0;
-  margin: 0;
-}
-
-.legend li {
-  margin: 6px 0;
-}
-
-.highlight-box {
+/* Style as needed—here’s a basic host layout */
+:host {
   display: inline-block;
-  width: 12px;
-  height: 12px;
-  background-color: #d0f5d0;
-  border: 1px solid #999;
-  margin-right: 8px;
-  vertical-align: middle;
-}
-
-/* Force table and paginator to show properly */
-::ng-deep .p-datatable {
-  width: 100% !important;
-}
-
-::ng-deep .p-paginator {
-  margin-top: 1rem;
-  min-height: 40px;
-}
-
-/* Optional: Make charts scrollable on smaller screens */
-highcharts-chart {
-  max-width: 100%;
-  overflow-x: auto;
-  display: block;
+  margin-left: 10px;
 }
