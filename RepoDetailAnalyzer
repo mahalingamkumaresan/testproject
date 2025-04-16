@@ -4,16 +4,16 @@ MinimalRepoFileAnalyzer
 
 Purpose:
   - Reads SPKs (project keys) from an Excel file (e.g., WTMSPK.xlsx).
-  - For each project key:
-     1. Retrieves the list of repositories (with repository IDs and URLs).
-     2. For each repository, fetches all files (via pagination) in the default branch.
-     3. Analyzes file paths to infer:
-         - Programming languages (by file extensions)
-         - Frameworks/technologies (by known filenames and folder structure)
-         - Unique file extensions present in the repository
-         - Total file count.
-  - No extra calls for branch/commit counts.
-  - Logs structured data in JSON and prints out final results.
+  - For each SPK:
+      1. Retrieves the list of repositories (with IDs and URL information).
+      2. Processes up to a configurable maximum number of repositories per SPK.
+      3. For each repository, fetches all files (via pagination) in the default branch.
+      4. Analyzes file paths to infer:
+           - Programming languages (by file extensions)
+           - Frameworks/technologies (by known filenames/folder structure)
+           - Unique file extensions present in the repository
+           - Total file count.
+  - Writes the final analysis results to an Excel file.
 """
 
 import os
@@ -24,8 +24,15 @@ import logging
 import threading
 import requests
 import openpyxl
+import pandas as pd
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ------------------------------
+# Configuration Variables
+# ------------------------------
+# Set the maximum number of repositories to process per SPK.
+MAX_REPOS_PER_SPK = 10  # Set to None to process all repos if desired.
 
 # ------------------------------
 # Custom JSON Logging Formatter
@@ -191,7 +198,7 @@ def get_files_with_pagination(api_client: GenericAPIClient, project_key: str, re
                 extra={"error_category": "API Failure", "severity": "error"}
             )
             break
-        # Expecting the API to return a 'values' list with file paths.
+        # Expect the API to return a "values" list containing file paths.
         values = response_data.get("values", [])
         all_files.extend(values)
         if "nextPageStart" in response_data:
@@ -208,7 +215,7 @@ def analyze_file_list(file_list: list) -> dict:
     Analyzes file paths to identify:
       - Languages (by file extensions)
       - Frameworks/technologies (by known filenames/folder hints)
-      - Unique file extensions in the repository
+      - Unique file extensions present in the repository
       - Total file count
     """
     languages = set()
@@ -234,7 +241,6 @@ def analyze_file_list(file_list: list) -> dict:
             languages.add("Java")
         if "src/main/resources" in file_path:
             frameworks.add("Spring")
-
     return {
         "languages": list(languages),
         "frameworks": list(frameworks),
@@ -256,7 +262,7 @@ def analyze_repository(api_client: GenericAPIClient, project_key: str, repo: dic
     repo_name = repo.get("name", repo_slug)
     logger.info(f"Analyzing repository {project_key}/{repo_slug}, ID={repo_id}")
 
-    # Try to capture the repository URL from the repo object's links.
+    # Attempt to capture the repository URL from the repo object's links.
     repo_links = repo.get("links", {})
     self_links = repo_links.get("self", [])
     if self_links and isinstance(self_links, list):
@@ -264,7 +270,7 @@ def analyze_repository(api_client: GenericAPIClient, project_key: str, repo: dic
     else:
         repo_url = f"{api_client.base_url}/projects/{project_key}/repos/{repo_slug}"
 
-    # Gather files from the repo.
+    # Retrieve all files from the repository.
     file_paths = get_files_with_pagination(api_client, project_key, repo_slug)
     file_analysis = analyze_file_list(file_paths)
 
@@ -284,19 +290,20 @@ def analyze_repository(api_client: GenericAPIClient, project_key: str, repo: dic
 # ------------------------------
 # Process Each SPK (Project)
 # ------------------------------
-def process_single_project(api_client: GenericAPIClient, project_key: str) -> list:
+def process_single_project(api_client: GenericAPIClient, project_key: str, max_repos: int) -> list:
     """
-    Retrieves the repositories for the given SPK, analyzes each repo's files,
-    and returns the results.
+    Retrieves the repositories for the given SPK, then processes up to max_repos repositories.
     """
     repos = get_repos(api_client, project_key)
+    if max_repos is not None:
+        repos = repos[:max_repos]
     project_results = []
     for repo in repos:
         analysis = analyze_repository(api_client, project_key, repo)
         project_results.append(analysis)
     return project_results
 
-def process_spks(input_excel: str, api_client: GenericAPIClient) -> list:
+def process_spks(input_excel: str, api_client: GenericAPIClient, max_repos: int) -> list:
     """
     Reads SPKs (project keys) from an Excel file, processes them in parallel,
     and returns aggregated analysis results.
@@ -311,7 +318,7 @@ def process_spks(input_excel: str, api_client: GenericAPIClient) -> list:
             project_key = row[0]
             if not project_key:
                 continue
-            future = executor.submit(process_single_project, api_client, project_key)
+            future = executor.submit(process_single_project, api_client, project_key, max_repos)
             future_to_project[future] = project_key
 
         for future in as_completed(future_to_project):
@@ -340,7 +347,7 @@ def main():
     logger.info("MinimalRepoFileAnalyzer process started.")
     
     # Read SPKs from an Excel file
-    input_excel = "WTMSPK.xlsx"  # Change as needed.
+    input_excel = "WTMSPK.xlsx"  # Adjust filename/path as needed.
     
     # Bitbucket API configuration:
     BITBUCKET_BASE_URL = os.getenv("BITBUCKET_BASE_URL", "https://scm.example.com/rest/api/1.0")
@@ -350,13 +357,15 @@ def main():
     token_bucket = TokenBucket(capacity=75, tokens_per_second=5)
     api_client = GenericAPIClient(BITBUCKET_BASE_URL, token_bucket, auth=(BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD))
     
-    results = process_spks(input_excel, api_client)
+    results = process_spks(input_excel, api_client, MAX_REPOS_PER_SPK)
     sanitized = sanitize_rows(results)
     logger.info(f"Total repositories analyzed: {len(sanitized)}")
     
-    # Print the results in JSON format.
-    for item in sanitized:
-        print(json.dumps(item, indent=2))
+    # Create a pandas DataFrame and output the data into an Excel file.
+    df = pd.DataFrame(sanitized)
+    output_excel = "RepoAnalysisResults.xlsx"
+    df.to_excel(output_excel, index=False)
+    logger.info(f"Results written to {output_excel}")
     
     end_time = datetime.now()
     logger.info(f"Process completed in {str(end_time - start_time)}.")
