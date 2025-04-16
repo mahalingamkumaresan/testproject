@@ -1,3 +1,19 @@
+#!/usr/bin/env python3
+"""
+BitbucketRepoAnalyzer – SPK Output Version with 429 Handling
+
+Processes each SPK (project key) from an input Excel, skipping any SPK whose output file already exists.
+For each repository under that SPK, it:
+  - Uses the top (most recently modified) branch.
+  - Retrieves the last commit date on that branch.
+  - Fetches all file paths via pagination (limit=1000, at=branch).
+  - Optionally uses Pygments to guess file languages for each unique extension; otherwise falls back to extension-based mapping.
+  - Applies filename & folder heuristics to detect frameworks/technologies.
+All results for an SPK are written to a single Excel file: C:\riskportal\output\{project_key}_repos.xlsx
+
+If any API call returns HTTP 429, the client waits 15 seconds before retrying.
+Warnings (e.g. InsecureRequestWarning) are disabled.
+"""
 
 import os
 import time
@@ -12,9 +28,9 @@ from openpyxl import load_workbook
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pygments.lexers import guess_lexer_for_filename
 from pygments.util import ClassNotFound
+import urllib3
 
 # Disable insecure request warnings
-import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ---------------------------------------------------------------------
@@ -38,17 +54,17 @@ MAX_WORKERS = 5
 # ---------------------------------------------------------------------
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        log_record = {
+        lr = {
             "timestamp": self.formatTime(record),
             "level": record.levelname,
             "module": record.name,
             "message": record.getMessage(),
         }
         if hasattr(record, "error_category"):
-            log_record["error_category"] = record.error_category
+            lr["error_category"] = record.error_category
         if hasattr(record, "severity"):
-            log_record["severity"] = record.severity
-        return json.dumps(log_record)
+            lr["severity"] = record.severity
+        return json.dumps(lr)
 
 def configure_logging() -> logging.Logger:
     os.makedirs(os.path.join(OUTPUT_FOLDER, "logs"), exist_ok=True)
@@ -88,7 +104,7 @@ class TokenBucket:
             time.sleep(0.1)
 
 # ---------------------------------------------------------------------
-# Generic API Client with Backoff
+# Generic API Client with Backoff & 429 Handling
 # ---------------------------------------------------------------------
 class GenericAPIClient:
     def __init__(self, base_url: str, bucket: TokenBucket, auth: tuple = None):
@@ -105,18 +121,24 @@ class GenericAPIClient:
 
     def make_request(self, endpoint: str, params: dict = None, retries: int = 3, base_delay: float = 1.0):
         url = f"{self.base_url}{endpoint}"
-        for i in range(retries):
+        for attempt in range(retries):
             self.bucket.consume(1)
             try:
-                self.logger.debug(f"GET {url} params={params} attempt={i+1}")
+                self.logger.debug(f"GET {url} params={params} attempt={attempt+1}")
                 r = self.session.get(url, params=params)
+                if r.status_code == 429:
+                    self.logger.warning(f"429 Too Many Requests for {url}, sleeping 15s")
+                    time.sleep(15)
+                    continue
                 r.raise_for_status()
                 return r.json(), None
             except requests.RequestException as e:
                 code = r.status_code if 'r' in locals() else 'N/A'
-                self.logger.error(f"{url} failed: {e} (status {code})",
-                                  extra={"error_category":"API","severity":"error"})
-                time.sleep(base_delay * (2**i) + random.random())
+                self.logger.error(
+                    f"{url} failed: {e} (status {code})",
+                    extra={"error_category": "API Failure", "severity": "error"}
+                )
+                time.sleep(base_delay * (2**attempt) + random.random())
         return None, "Max retries exceeded"
 
 # ---------------------------------------------------------------------
@@ -143,8 +165,13 @@ FILE_FRAMEWORK_MAP = {
 }
 
 # ---------------------------------------------------------------------
-# Helpers: Branch, Commits, Files
+# Helpers: Repos, Branch, Commits, Files
 # ---------------------------------------------------------------------
+def get_repos(client, pk):
+    data, err = client.make_request(f"/projects/{pk}/repos", params={"limit":1000})
+    if err: return []
+    return data.get("values", [])
+
 def get_top_branch(client, pk, slug):
     data, err = client.make_request(f"/projects/{pk}/repos/{slug}/branches",
                                      params={"orderBy":"MODIFICATION","limit":1})
@@ -177,17 +204,20 @@ def get_files_with_pagination(client, pk, slug, branch):
     return files
 
 def get_file_content(client, pk, slug, branch, path):
-    p=path.lstrip("/")
+    p = path.lstrip("/")
     client.bucket.consume()
     try:
-        r=client.session.get(
+        r = client.session.get(
             f"{client.base_url}/projects/{pk}/repos/{slug}/raw/{p}",
             params={"at":branch}, verify=False
         )
+        if r.status_code == 429:
+            time.sleep(15)
+            r = client.session.get(f"{client.base_url}/projects/{pk}/repos/{slug}/raw/{p}",
+                                   params={"at":branch}, verify=False)
         r.raise_for_status()
         return r.text
-    except Exception as e:
-        logger.error(f"raw/{p} error: {e}", extra={"error_category":"FileFetch"})
+    except:
         return ""
 
 # ---------------------------------------------------------------------
@@ -197,18 +227,16 @@ def analyze_file_list(file_list, use_lexer, client, pk, slug, branch):
     uniq = {}
     for fp in file_list:
         ext = os.path.splitext(os.path.basename(fp))[1].lower()
-        if ext not in uniq: uniq[ext]=fp
+        if ext not in uniq: uniq[ext] = fp
 
     langs, frs = set(), set()
     if use_lexer:
-        for ext, sample in uniq.items():
-            content = get_file_content(client, pk, slug, branch, sample)
-            if content:
+        for ext, samp in uniq.items():
+            c = get_file_content(client, pk, slug, branch, samp)
+            if c:
                 try:
-                    lx = guess_lexer_for_filename("x"+ext,content)
+                    lx = guess_lexer_for_filename("x"+ext, c)
                     langs.add(lx.name)
-                except ClassNotFound:
-                    if ext in EXT_LANG_MAP: langs.add(EXT_LANG_MAP[ext])
                 except:
                     if ext in EXT_LANG_MAP: langs.add(EXT_LANG_MAP[ext])
             else:
@@ -218,14 +246,14 @@ def analyze_file_list(file_list, use_lexer, client, pk, slug, branch):
             if ext in EXT_LANG_MAP: langs.add(EXT_LANG_MAP[ext])
 
     for fp in file_list:
-        bn=os.path.basename(fp)
+        bn = os.path.basename(fp)
         if bn in FILE_FRAMEWORK_MAP: frs.add(FILE_FRAMEWORK_MAP[bn])
         if "node_modules" in fp: frs.add("Node.js")
         if "venv" in fp or "env" in fp: frs.add("Python VirtualEnv")
         if "src/main/java" in fp: langs.add("Java")
         if "src/main/resources" in fp: frs.add("Spring MVC")
 
-    exts = ["<no extension>" if e=="" else e for e in sorted(uniq)]
+    exts = [os.path.basename(uniq[e]) if e=="" else e for e in sorted(uniq)]
     return {
         "unique_extensions": exts,
         "languages": sorted(langs),
@@ -234,7 +262,7 @@ def analyze_file_list(file_list, use_lexer, client, pk, slug, branch):
     }
 
 # ---------------------------------------------------------------------
-# SPK Output Management
+# SPK Output Management – One File per SPK
 # ---------------------------------------------------------------------
 def spk_filepath(pk):
     return os.path.join(OUTPUT_FOLDER, f"{pk}_repos.xlsx")
@@ -250,19 +278,18 @@ def process_spk(client, pk):
         "branch_name","last_commit_date","file_count",
         "unique_extensions","languages","frameworks"
     ])
-    repos = get_repos(client, pk)
-    for r in repos:
-        slug=r["slug"]
-        branch=get_top_branch(client,pk,slug)
-        lcd=get_last_commit_date(client,pk,slug,branch)
-        files=get_files_with_pagination(client,pk,slug,branch)
-        an=analyze_file_list(files,USE_LEXER_ANALYSIS,client,pk,slug,branch)
+    for r in get_repos(client, pk):
+        slug = r["slug"]
+        br = get_top_branch(client, pk, slug)
+        lcd= get_last_commit_date(client, pk, slug, br)
+        files = get_files_with_pagination(client, pk, slug, br)
+        an = analyze_file_list(files, USE_LEXER_ANALYSIS, client, pk, slug, br)
         url=(r.get("links") or {}).get("self",[{}])[0].get("href",
-            f"{client.base_url}/projects/{pk}/repos/{slug}")
-        rec={
+             f"{client.base_url}/projects/{pk}/repos/{slug}")
+        rec = {
             "project_key":pk,"repo_slug":slug,"repo_id":r.get("id"),
             "repo_url":url,"repo_name":r.get("name",slug),
-            "branch_name":branch,"last_commit_date":lcd,
+            "branch_name":br,"last_commit_date":lcd,
             "file_count":an["file_count"],
             "unique_extensions":", ".join(an["unique_extensions"]),
             "languages":", ".join(an["languages"]),
@@ -272,25 +299,23 @@ def process_spk(client, pk):
     df.to_excel(out, index=False)
     logger.info(f"Wrote SPK output: {out}")
 
-def get_repos(client, pk):
-    data, err = client.make_request(f"/projects/{pk}/repos", params={"limit":1000})
-    if err: return []
-    return data.get("values",[])
-
 def main():
     start = datetime.now()
     logger.info("Starting BitbucketRepoAnalyzer")
     if not os.path.isfile(INPUT_EXCEL):
         logger.error(f"Missing input: {INPUT_EXCEL}")
         return
-    wb=load_workbook(INPUT_EXCEL)
-    spks=[r[0] for r in wb.active.iter_rows(min_row=2,values_only=True) if r and r[0]]
-    bucket=TokenBucket(TOKEN_BUCKET_CAPACITY,TOKENS_PER_SECOND)
-    client=GenericAPIClient(BITBUCKET_BASE_URL,bucket,auth=(BITBUCKET_USERNAME,BITBUCKET_APP_PASSWORD))
+    wb = load_workbook(INPUT_EXCEL)
+    spks = [r[0] for r in wb.active.iter_rows(min_row=2,values_only=True) if r and r[0]]
+    bucket = TokenBucket(TOKEN_BUCKET_CAPACITY, TOKENS_PER_SECOND)
+    client = GenericAPIClient(
+        BITBUCKET_BASE_URL, bucket,
+        auth=(BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD)
+    )
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         for pk in spks:
             ex.submit(process_spk, client, pk)
     logger.info(f"Completed in {datetime.now()-start}")
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
