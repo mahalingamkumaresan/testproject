@@ -1,24 +1,4 @@
-#!/usr/bin/env python3
-"""
-BitbucketRepoAnalyzer with Real Lexer Implementation
 
-Features:
-  1. Reads SPKs (project keys) from C:\riskportal\WTMSPK.xlsx.
-  2. For each SPK:
-       - Retrieves the list of repositories.
-       - Processes up to MAX_REPOS_PER_SPK repositories per SPK.
-       - Checks if the repo is already processed (by checking the output Excel) and skips if so.
-       - Retrieves all file paths via pagination (limit=1000).
-       - If USE_LEXER_ANALYSIS is True:
-           • For each unique file extension, fetch a sample file’s content from the raw file API
-             (using the repo’s default branch if available).
-           • Use Pygments’ lexer to determine the actual language.
-       - Otherwise, uses a simple extension‐based mapping.
-       - Also uses heuristics (folder names, specific file names) to infer frameworks/technologies.
-       - Writes the output immediately to C:\riskportal\spk_repo_details.xlsx.
-       
-Adjust BITBUCKET_BASE_URL, credentials, and other paths as needed.
-"""
 
 import os
 import time
