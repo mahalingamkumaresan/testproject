@@ -1,3 +1,26 @@
+#!/usr/bin/env python3
+"""
+BitbucketRepoAnalyzer with Top Branch Processing and Expanded Language/Framework Mapping
+
+Features:
+  1. Reads SPKs (project keys) from C:\riskportal\WTMSPK.xlsx.
+  2. For each SPK:
+       - Retrieves all repositories.
+       - For each repository:
+           • Skips processing if an output file (named as {project_key}_{repo_slug}.xlsx) already exists.
+           • Determines the top (most recently modified) branch.
+           • Retrieves all file paths via pagination (limit=1000).
+           • For each unique file extension, if USE_LEXER_ANALYSIS is True, fetch a sample file’s content and use Pygments to guess the language; otherwise, or if the lexer fails, fall back to an extension‐based mapping.
+           • Applies heuristics (based on filenames and folder paths) to infer frameworks/technologies.
+       - Writes the repository’s analysis immediately to an Excel file named {project_key}_{repo_slug}.xlsx in C:\riskportal.
+       
+Configuration:
+  - Input file: C:\riskportal\WTMSPK.xlsx
+  - Output folder: C:\riskportal\
+  - Always uses the top-most branch (based on modification date) for processing.
+  - Expanded mappings for many important technologies.
+"""
+
 import os
 import time
 import json
@@ -20,11 +43,10 @@ BITBUCKET_BASE_URL = os.getenv("BITBUCKET_BASE_URL", "https://scm.example.com/re
 BITBUCKET_USERNAME = os.getenv("BITBUCKET_USERNAME", "")
 BITBUCKET_APP_PASSWORD = os.getenv("BITBUCKET_APP_PASSWORD", "")
 INPUT_EXCEL = r"C:\riskportal\WTMSPK.xlsx"
-OUTPUT_FOLDER = r"C:\riskportal"  # All outputs will be written here.
+OUTPUT_FOLDER = r"C:\riskportal"  # All output files will be written here.
 TOKEN_BUCKET_CAPACITY = 75
 TOKENS_PER_SECOND = 5
 MAX_WORKERS = 5
-MAX_REPOS_PER_SPK = 10  # Set to None to process all repos per SPK.
 
 # ---------------------------------------------------------------------
 # Logging Configuration
@@ -47,13 +69,13 @@ def configure_logging() -> logging.Logger:
     logs_folder = os.path.join(OUTPUT_FOLDER, "logs")
     os.makedirs(logs_folder, exist_ok=True)
     log_path = os.path.join(logs_folder, "process_log.txt")
-
+    
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(JsonFormatter())
-
+    
     file_handler = logging.FileHandler(log_path)
     file_handler.setFormatter(JsonFormatter())
-
+    
     logging.basicConfig(level=logging.DEBUG, handlers=[console_handler, file_handler])
     return logging.getLogger("BitbucketRepoAnalyzer")
 
@@ -97,7 +119,7 @@ class GenericAPIClient:
         self.session = requests.Session()
         if self.auth:
             self.session.auth = self.auth
-        # For simplicity, disable SSL verification (adjust as needed)
+        # Disable SSL verification (adjust as needed)
         self.session.verify = False
         adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
         self.session.mount("http://", adapter)
@@ -133,7 +155,9 @@ def get_file_content(api_client: GenericAPIClient, project_key: str, repo_slug: 
     Fetch raw file content.
     Endpoint: /projects/{project_key}/repos/{repo_slug}/raw/{file_path}?at={branch}
     """
-    endpoint = f"/projects/{project_key}/repos/{repo_slug}/raw/{file_path}"
+    # Ensure file path does not have a leading slash
+    file_path_clean = file_path.lstrip("/")
+    endpoint = f"/projects/{project_key}/repos/{repo_slug}/raw/{file_path_clean}"
     params = {"at": branch}
     api_client.token_bucket.consume(1)
     try:
@@ -147,12 +171,12 @@ def get_file_content(api_client: GenericAPIClient, project_key: str, repo_slug: 
         return ""
 
 # ---------------------------------------------------------------------
-# Helper Function: Get Top (Most Recently Modified) Branch
+# Helper Function: Get Top Branch Based on Modification Date
 # ---------------------------------------------------------------------
 def get_top_branch(api_client: GenericAPIClient, project_key: str, repo_slug: str) -> str:
     """
     Retrieve the top-most branch (ordered by modification date) for the given repository.
-    If unable to retrieve, fall back to 'master'.
+    Falls back to 'master' if unable to retrieve.
     """
     endpoint = f"/projects/{project_key}/repos/{repo_slug}/branches"
     params = {"orderBy": "MODIFICATION", "limit": 1}
@@ -163,42 +187,70 @@ def get_top_branch(api_client: GenericAPIClient, project_key: str, repo_slug: st
     return data["values"][0].get("displayId", "master")
 
 # ---------------------------------------------------------------------
-# Extension and Filename Mappings for Fallback
+# Expanded Mappings for Language and Framework Detection
 # ---------------------------------------------------------------------
+# Mapping file extension to programming language.
 EXT_LANG_MAP = {
-    ".py": "Python",
     ".java": "Java",
+    ".kt": "Kotlin",
+    ".sql": "SQL",             # For Oracle SQL/PLSQL, MS SQL Server, etc.
+    ".pls": "PL/SQL",
+    ".pks": "PL/SQL",
+    ".pkb": "PL/SQL",
+    ".py": "Python",
     ".js": "JavaScript",
     ".ts": "TypeScript",
-    ".rb": "Ruby",
-    ".cs": "C#",
-    ".cpp": "C++",
-    ".c": "C",
-    ".go": "Go",
-    ".php": "PHP",
-    ".rs": "Rust",
-    ".kt": "Kotlin",
+    ".html": "HTML",
+    ".htm": "HTML",
+    ".sh": "Shell Script",     # For Unix shells
+    ".bash": "Shell Script",
+    ".ksh": "Shell Script",
+    ".vbs": "VBScript",
+    ".m": "Objective-C",       # For iOS (could also indicate MATLAB, but context matters)
     ".swift": "Swift",
-    # Extend if needed.
+    ".cpp": "C++",             # VC++, Visual C++
+    ".c": "C",
+    ".cs": "C#",              # For .NET Core, .NET Framework, ADO.NET, MVC, Web API, etc.
+    ".jsp": "JSP",             # For J2EE, Struts, etc.
+    ".cbl": "COBOL",
+    ".cob": "COBOL",
+    # Extend further as needed.
 }
 
+# Mapping specific filenames/configuration names to frameworks/technologies.
 FILE_FRAMEWORK_MAP = {
     "pom.xml": "Maven",
     "build.gradle": "Gradle",
-    "package.json": "Node.js / npm",
+    "package.json": "Node.js",
     "requirements.txt": "Python (pip)",
     "Gemfile": "Ruby on Rails",
     "composer.json": "Composer (PHP)",
     "Cargo.toml": "Rust (Cargo)",
     "Makefile": "Make",
-    # Extend if needed.
+    "web.config": ".NET Framework",
+    "project.json": ".NET Core",
+    "struts.xml": "Struts",
+    "applicationContext.xml": "Spring",  # General Spring config; could infer Spring MVC if coupled with other clues
+    "spring-servlet.xml": "Spring MVC",
+    "hibernate.cfg.xml": "Hibernate",
+    "beans.xml": "Java EE (CDI)",
+    "mule-config.xml": "Mule ESB",
+    # Additional mappings for other technologies:
+    # Oracle-related configuration files (if any) could be mapped here.
+    # For Siebel, there might be Siebel-specific config files (e.g., siebui.cfg) if available.
+    # For Tableau: .twb or .twbx files
+    ".twb": "Tableau",
+    ".twbx": "Tableau",
+    "angular.js": "AngularJS",
+    "jquery.min.js": "jQuery",
+    # For COBOL, already covered by extension; you might also map specific configuration files if any.
 }
 
 # ---------------------------------------------------------------------
-# API Calls to Retrieve Repositories and Files
+# API Calls for Repositories and Files
 # ---------------------------------------------------------------------
 def get_repos(api_client: GenericAPIClient, project_key: str) -> list:
-    """Retrieve all repositories for the given project (SPK)."""
+    """Retrieve all repositories for the given SPK."""
     endpoint = f"/projects/{project_key}/repos"
     params = {"limit": 1000}
     data, error = api_client.make_request(endpoint, params=params)
@@ -241,13 +293,13 @@ def get_files_with_pagination(api_client: GenericAPIClient, project_key: str, re
 # ---------------------------------------------------------------------
 def analyze_file_list(file_list: list, use_lexer: bool, api_client=None, project_key=None, repo_slug=None, branch="master") -> dict:
     """
-    Analyze the file list.
-      1. Collate all unique extensions with a sample file.
-      2. If use_lexer is enabled, fetch a sample file's content and use Pygments to guess the language.
-         Otherwise, use a simple extension mapping.
-      3. Apply heuristics on folder names and specific file names to detect frameworks.
+    Analyze the file list:
+      1. Collate all unique extensions with one sample file per extension.
+      2. If use_lexer is enabled, for each unique extension, fetch sample file content and use Pygments to guess the language.
+         Otherwise, use EXT_LANG_MAP.
+      3. Additionally, apply heuristics based on filename and folder path to infer frameworks.
     """
-    unique_extensions = {}  # Map extension -> sample file path.
+    unique_extensions = {}  # extension -> sample file path
     for file_path in file_list:
         base_name = os.path.basename(file_path)
         ext = os.path.splitext(base_name)[1].lower()
@@ -280,11 +332,12 @@ def analyze_file_list(file_list: list, use_lexer: bool, api_client=None, project
             if ext in EXT_LANG_MAP:
                 languages.add(EXT_LANG_MAP[ext])
 
-    # Apply additional heuristics based on file names and folder structure.
+    # Apply additional heuristics across all file paths.
     for file_path in file_list:
         base_name = os.path.basename(file_path)
         if base_name in FILE_FRAMEWORK_MAP:
             frameworks.add(FILE_FRAMEWORK_MAP[base_name])
+        # Folder-based heuristics:
         if "node_modules" in file_path:
             frameworks.add("Node.js")
         if "venv" in file_path or "env" in file_path:
@@ -292,8 +345,7 @@ def analyze_file_list(file_list: list, use_lexer: bool, api_client=None, project
         if "src/main/java" in file_path:
             languages.add("Java")
         if "src/main/resources" in file_path:
-            frameworks.add("Spring")
-
+            frameworks.add("Spring MVC")
     return {
         "unique_extensions": list(sorted(unique_extensions.keys())),
         "languages": list(sorted(languages)),
@@ -306,8 +358,7 @@ def analyze_file_list(file_list: list, use_lexer: bool, api_client=None, project
 # ---------------------------------------------------------------------
 def write_repo_output(project_key: str, repo_slug: str, record: dict):
     """
-    Write the analysis record to an Excel file named after the project key and repo slug.
-    For example: C:\riskportal\PROJECT_REPO.xlsx
+    Write the analysis record to an Excel file named {project_key}_{repo_slug}.xlsx in OUTPUT_FOLDER.
     """
     output_filename = f"{project_key}_{repo_slug}.xlsx"
     output_filepath = os.path.join(OUTPUT_FOLDER, output_filename)
@@ -317,7 +368,7 @@ def write_repo_output(project_key: str, repo_slug: str, record: dict):
 
 def already_processed(project_key: str, repo_slug: str) -> bool:
     """
-    Check if the output file for this repo already exists.
+    Check if the output file for this repository already exists.
     """
     output_filename = f"{project_key}_{repo_slug}.xlsx"
     output_filepath = os.path.join(OUTPUT_FOLDER, output_filename)
@@ -332,7 +383,7 @@ def process_single_repo(api_client: GenericAPIClient, project_key: str, repo: di
         logger.info(f"Skipping {project_key}/{repo_slug} as output file already exists.")
         return
 
-    # Always use the top-most branch instead of the default.
+    # Always use the top-most branch (most recently modified) for processing.
     top_branch = get_top_branch(api_client, project_key, repo_slug)
 
     file_paths = get_files_with_pagination(api_client, project_key, repo_slug)
@@ -364,10 +415,8 @@ def process_single_repo(api_client: GenericAPIClient, project_key: str, repo: di
 # ---------------------------------------------------------------------
 # Process a Single SPK (Project)
 # ---------------------------------------------------------------------
-def process_single_spk(api_client: GenericAPIClient, project_key: str, max_repos: int) -> None:
+def process_single_spk(api_client: GenericAPIClient, project_key: str) -> None:
     repos = get_repos(api_client, project_key)
-    if max_repos is not None:
-        repos = repos[:max_repos]
     for repo in repos:
         process_single_repo(api_client, project_key, repo)
 
@@ -391,7 +440,7 @@ def main():
     api_client = GenericAPIClient(BITBUCKET_BASE_URL, token_bucket, auth=(BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD))
 
     def spk_worker(spk: str) -> str:
-        process_single_spk(api_client, spk, MAX_REPOS_PER_SPK)
+        process_single_spk(api_client, spk)
         return spk
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
