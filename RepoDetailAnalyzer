@@ -20,8 +20,7 @@ BITBUCKET_BASE_URL = os.getenv("BITBUCKET_BASE_URL", "https://scm.example.com/re
 BITBUCKET_USERNAME = os.getenv("BITBUCKET_USERNAME", "")
 BITBUCKET_APP_PASSWORD = os.getenv("BITBUCKET_APP_PASSWORD", "")
 INPUT_EXCEL = r"C:\riskportal\WTMSPK.xlsx"
-# Output files will be created individually in this folder.
-OUTPUT_FOLDER = r"C:\riskportal"
+OUTPUT_FOLDER = r"C:\riskportal"  # All outputs will be written here.
 TOKEN_BUCKET_CAPACITY = 75
 TOKENS_PER_SECOND = 5
 MAX_WORKERS = 5
@@ -148,6 +147,22 @@ def get_file_content(api_client: GenericAPIClient, project_key: str, repo_slug: 
         return ""
 
 # ---------------------------------------------------------------------
+# Helper Function: Get Top (Most Recently Modified) Branch
+# ---------------------------------------------------------------------
+def get_top_branch(api_client: GenericAPIClient, project_key: str, repo_slug: str) -> str:
+    """
+    Retrieve the top-most branch (ordered by modification date) for the given repository.
+    If unable to retrieve, fall back to 'master'.
+    """
+    endpoint = f"/projects/{project_key}/repos/{repo_slug}/branches"
+    params = {"orderBy": "MODIFICATION", "limit": 1}
+    data, error = api_client.make_request(endpoint, params=params)
+    if error or not data or "values" not in data or not data["values"]:
+        logger.warning(f"Unable to get top branch for {project_key}/{repo_slug}: Using fallback 'master'")
+        return "master"
+    return data["values"][0].get("displayId", "master")
+
+# ---------------------------------------------------------------------
 # Extension and Filename Mappings for Fallback
 # ---------------------------------------------------------------------
 EXT_LANG_MAP = {
@@ -222,16 +237,17 @@ def get_files_with_pagination(api_client: GenericAPIClient, project_key: str, re
     return all_files
 
 # ---------------------------------------------------------------------
-# Analysis Logic: Using Lexer or Fallback via Extension Mapping
+# Analysis Logic: Using Lexer or Fallback Based on File Extension
 # ---------------------------------------------------------------------
 def analyze_file_list(file_list: list, use_lexer: bool, api_client=None, project_key=None, repo_slug=None, branch="master") -> dict:
     """
-    Analyzes the file list. First, collate all unique extensions along with a sample file.
-    If use_lexer is True, fetch sample file content and use Pygments to guess language.
-    Otherwise, use EXT_LANG_MAP for language detection.
-    Also applies heuristics to detect frameworks.
+    Analyze the file list.
+      1. Collate all unique extensions with a sample file.
+      2. If use_lexer is enabled, fetch a sample file's content and use Pygments to guess the language.
+         Otherwise, use a simple extension mapping.
+      3. Apply heuristics on folder names and specific file names to detect frameworks.
     """
-    unique_extensions = {}  # Map: extension -> sample file path
+    unique_extensions = {}  # Map extension -> sample file path.
     for file_path in file_list:
         base_name = os.path.basename(file_path)
         ext = os.path.splitext(base_name)[1].lower()
@@ -264,7 +280,7 @@ def analyze_file_list(file_list: list, use_lexer: bool, api_client=None, project
             if ext in EXT_LANG_MAP:
                 languages.add(EXT_LANG_MAP[ext])
 
-    # Apply additional heuristics across all file paths.
+    # Apply additional heuristics based on file names and folder structure.
     for file_path in file_list:
         base_name = os.path.basename(file_path)
         if base_name in FILE_FRAMEWORK_MAP:
@@ -291,7 +307,7 @@ def analyze_file_list(file_list: list, use_lexer: bool, api_client=None, project
 def write_repo_output(project_key: str, repo_slug: str, record: dict):
     """
     Write the analysis record to an Excel file named after the project key and repo slug.
-    For example: C:\riskportal\ABC_myrepo.xlsx
+    For example: C:\riskportal\PROJECT_REPO.xlsx
     """
     output_filename = f"{project_key}_{repo_slug}.xlsx"
     output_filepath = os.path.join(OUTPUT_FOLDER, output_filename)
@@ -316,13 +332,11 @@ def process_single_repo(api_client: GenericAPIClient, project_key: str, repo: di
         logger.info(f"Skipping {project_key}/{repo_slug} as output file already exists.")
         return
 
-    # Determine default branch if provided; fallback to "master"
-    default_branch = "master"
-    if repo.get("defaultBranch") and isinstance(repo.get("defaultBranch"), dict):
-        default_branch = repo.get("defaultBranch").get("displayId", "master")
+    # Always use the top-most branch instead of the default.
+    top_branch = get_top_branch(api_client, project_key, repo_slug)
 
     file_paths = get_files_with_pagination(api_client, project_key, repo_slug)
-    analysis = analyze_file_list(file_paths, USE_LEXER_ANALYSIS, api_client, project_key, repo_slug, default_branch)
+    analysis = analyze_file_list(file_paths, USE_LEXER_ANALYSIS, api_client, project_key, repo_slug, top_branch)
 
     repo_id = repo.get("id")
     repo_name = repo.get("name", repo_slug)
