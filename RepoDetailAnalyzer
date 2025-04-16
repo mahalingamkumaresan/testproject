@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
 """
+BitbucketRepoAnalyzer – SPK Output Version (Skip Processed SPK)
 
+This script processes all repositories for each SPK (project key) read from an input Excel file.
+For each SPK:
+  - Before processing, it checks if the SPK’s output file (named "{project_key}_repos.xlsx" in the output folder)
+    already exists. If so, processing for that SPK is skipped.
+  - Otherwise, for each repository:
+       • It retrieves the top (most recently modified) branch.
+       • It retrieves the last commit date on that branch.
+       • It fetches all file paths via pagination (limit=1000).
+       • Optionally (if USE_LEXER_ANALYSIS is True), it uses Pygments to guess the language from sample file content;
+         otherwise, it falls back to extension-based mapping.
+       • It applies filename and folder heuristics to detect frameworks/technologies.
+  - Finally, it writes all records for that SPK into a single Excel file in the output folder.
+  
+Warnings (e.g., InsecureRequestWarning) are disabled.
 """
 
 import os
@@ -17,15 +32,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pygments.lexers import guess_lexer_for_filename
 from pygments.util import ClassNotFound
 
+# Disable insecure request warnings
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 # ---------------------------------------------------------------------
 # Configuration Variables
 # ---------------------------------------------------------------------
-USE_LEXER_ANALYSIS = True   # Set to True to use real lexer analysis.
-BITBUCKET_BASE_URL = os.getenv("BITBUCKET_BASE_URL", "https://scm.example.com/rest/api/1.0")
+USE_LEXER_ANALYSIS = True   # Set to True to use real lexer-based analysis.
+BITBUCKET_BASE_URL = os.getenv("BITBUCKET_BASE_URL", "https://scm.horizon.bankofamerica.com/rest/api/latest")
 BITBUCKET_USERNAME = os.getenv("BITBUCKET_USERNAME", "")
 BITBUCKET_APP_PASSWORD = os.getenv("BITBUCKET_APP_PASSWORD", "")
-INPUT_EXCEL = r"C:\riskportal\WTMSPK.xlsx"
-OUTPUT_FOLDER = r"C:\riskportal"  # All output files will be written here.
+INPUT_EXCEL = r"C:\riskportal\spk.xlsx"
+OUTPUT_FOLDER = r"C:\riskportal\output"
 TOKEN_BUCKET_CAPACITY = 75
 TOKENS_PER_SECOND = 5
 MAX_WORKERS = 5
@@ -64,7 +83,7 @@ def configure_logging() -> logging.Logger:
 logger = configure_logging()
 
 # ---------------------------------------------------------------------
-# Rate Limiting with Token Bucket
+# Token Bucket for Rate Limiting
 # ---------------------------------------------------------------------
 class TokenBucket:
     def __init__(self, capacity: int, tokens_per_second: float) -> None:
@@ -101,8 +120,7 @@ class GenericAPIClient:
         self.session = requests.Session()
         if self.auth:
             self.session.auth = self.auth
-        # Disable SSL verification (adjust as needed)
-        self.session.verify = False
+        self.session.verify = False  # SSL verification disabled
         adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
@@ -130,14 +148,37 @@ class GenericAPIClient:
         return None, "Max retries exceeded"
 
 # ---------------------------------------------------------------------
+# Get Top Branch (Most Recently Modified)
+# ---------------------------------------------------------------------
+def get_top_branch(api_client: GenericAPIClient, project_key: str, repo_slug: str) -> str:
+    endpoint = f"/projects/{project_key}/repos/{repo_slug}/branches"
+    params = {"orderBy": "MODIFICATION", "limit": 1}
+    data, error = api_client.make_request(endpoint, params=params)
+    if error or not data or "values" not in data or not data["values"]:
+        logger.warning(f"Unable to get top branch for {project_key}/{repo_slug}: Using fallback 'master'")
+        return "master"
+    return data["values"][0].get("displayId", "master")
+
+# ---------------------------------------------------------------------
+# Get Last Commit Date from Top Branch
+# ---------------------------------------------------------------------
+def get_last_commit_date(api_client: GenericAPIClient, project_key: str, repo_slug: str, branch: str) -> str:
+    endpoint = f"/projects/{project_key}/repos/{repo_slug}/commits"
+    params = {"at": branch, "limit": 1}
+    data, error = api_client.make_request(endpoint, params=params)
+    if error or not data or "values" not in data or not data["values"]:
+        logger.warning(f"Unable to get commit data for {project_key}/{repo_slug} on branch {branch}")
+        return "N/A"
+    commit = data["values"][0]
+    timestamp = commit.get("authorTimestamp", 0)
+    if timestamp:
+        return datetime.fromtimestamp(timestamp / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    return "N/A"
+
+# ---------------------------------------------------------------------
 # Get Raw File Content from Bitbucket
 # ---------------------------------------------------------------------
 def get_file_content(api_client: GenericAPIClient, project_key: str, repo_slug: str, branch: str, file_path: str) -> str:
-    """
-    Fetch raw file content.
-    Endpoint: /projects/{project_key}/repos/{repo_slug}/raw/{file_path}?at={branch}
-    """
-    # Ensure file path does not have a leading slash
     file_path_clean = file_path.lstrip("/")
     endpoint = f"/projects/{project_key}/repos/{repo_slug}/raw/{file_path_clean}"
     params = {"at": branch}
@@ -153,29 +194,12 @@ def get_file_content(api_client: GenericAPIClient, project_key: str, repo_slug: 
         return ""
 
 # ---------------------------------------------------------------------
-# Helper Function: Get Top Branch Based on Modification Date
+# Mappings for Language and Framework Detection (Expanded)
 # ---------------------------------------------------------------------
-def get_top_branch(api_client: GenericAPIClient, project_key: str, repo_slug: str) -> str:
-    """
-    Retrieve the top-most branch (ordered by modification date) for the given repository.
-    Falls back to 'master' if unable to retrieve.
-    """
-    endpoint = f"/projects/{project_key}/repos/{repo_slug}/branches"
-    params = {"orderBy": "MODIFICATION", "limit": 1}
-    data, error = api_client.make_request(endpoint, params=params)
-    if error or not data or "values" not in data or not data["values"]:
-        logger.warning(f"Unable to get top branch for {project_key}/{repo_slug}: Using fallback 'master'")
-        return "master"
-    return data["values"][0].get("displayId", "master")
-
-# ---------------------------------------------------------------------
-# Expanded Mappings for Language and Framework Detection
-# ---------------------------------------------------------------------
-# Mapping file extension to programming language.
 EXT_LANG_MAP = {
     ".java": "Java",
     ".kt": "Kotlin",
-    ".sql": "SQL",             # For Oracle SQL/PLSQL, MS SQL Server, etc.
+    ".sql": "SQL",
     ".pls": "PL/SQL",
     ".pks": "PL/SQL",
     ".pkb": "PL/SQL",
@@ -184,22 +208,21 @@ EXT_LANG_MAP = {
     ".ts": "TypeScript",
     ".html": "HTML",
     ".htm": "HTML",
-    ".sh": "Shell Script",     # For Unix shells
+    ".sh": "Shell Script",
     ".bash": "Shell Script",
     ".ksh": "Shell Script",
     ".vbs": "VBScript",
-    ".m": "Objective-C",       # For iOS (could also indicate MATLAB, but context matters)
+    ".m": "Objective-C",
     ".swift": "Swift",
-    ".cpp": "C++",             # VC++, Visual C++
+    ".cpp": "C++",
     ".c": "C",
-    ".cs": "C#",              # For .NET Core, .NET Framework, ADO.NET, MVC, Web API, etc.
-    ".jsp": "JSP",             # For J2EE, Struts, etc.
+    ".cs": "C#",
+    ".jsp": "JSP",
     ".cbl": "COBOL",
     ".cob": "COBOL",
-    # Extend further as needed.
+    # Extend as needed...
 }
 
-# Mapping specific filenames/configuration names to frameworks/technologies.
 FILE_FRAMEWORK_MAP = {
     "pom.xml": "Maven",
     "build.gradle": "Gradle",
@@ -212,76 +235,59 @@ FILE_FRAMEWORK_MAP = {
     "web.config": ".NET Framework",
     "project.json": ".NET Core",
     "struts.xml": "Struts",
-    "applicationContext.xml": "Spring",  # General Spring config; could infer Spring MVC if coupled with other clues
+    "applicationContext.xml": "Spring",
     "spring-servlet.xml": "Spring MVC",
     "hibernate.cfg.xml": "Hibernate",
     "beans.xml": "Java EE (CDI)",
     "mule-config.xml": "Mule ESB",
-    # Additional mappings for other technologies:
-    # Oracle-related configuration files (if any) could be mapped here.
-    # For Siebel, there might be Siebel-specific config files (e.g., siebui.cfg) if available.
-    # For Tableau: .twb or .twbx files
     ".twb": "Tableau",
     ".twbx": "Tableau",
     "angular.js": "AngularJS",
     "jquery.min.js": "jQuery",
-    # For COBOL, already covered by extension; you might also map specific configuration files if any.
+    # Extend further as needed...
 }
 
 # ---------------------------------------------------------------------
-# API Calls for Repositories and Files
+# Retrieve All Repositories for an SPK
 # ---------------------------------------------------------------------
 def get_repos(api_client: GenericAPIClient, project_key: str) -> list:
-    """Retrieve all repositories for the given SPK."""
     endpoint = f"/projects/{project_key}/repos"
     params = {"limit": 1000}
     data, error = api_client.make_request(endpoint, params=params)
     if error:
-        logger.error(
-            f"Failed to get repos for project {project_key}: {error}",
-            extra={"error_category": "API Failure", "severity": "error"}
-        )
+        logger.error(f"Failed to get repos for project {project_key}: {error}",
+                     extra={"error_category": "API Failure", "severity": "error"})
         return []
     return data.get("values", [])
 
+# ---------------------------------------------------------------------
+# Retrieve All Files for a Repository (With Pagination)
+# ---------------------------------------------------------------------
 def get_files_with_pagination(api_client: GenericAPIClient, project_key: str, repo_slug: str) -> list:
-    """
-    Retrieve all files in the repository using pagination (limit=1000).
-    Stops if 'nextPageStart' is missing or None.
-    """
     all_files = []
     start = 0
     limit = 1000
     while True:
         endpoint = f"/projects/{project_key}/repos/{repo_slug}/files"
         params = {"limit": limit, "start": start}
-        response_data, error = api_client.make_request(endpoint, params=params)
+        data, error = api_client.make_request(endpoint, params=params)
         if error:
-            logger.error(
-                f"Failed to retrieve files for {project_key}/{repo_slug} (start={start}): {error}",
-                extra={"error_category": "API Failure", "severity": "error"}
-            )
+            logger.error(f"Failed to retrieve files for {project_key}/{repo_slug} (start={start}): {error}",
+                         extra={"error_category": "API Failure", "severity": "error"})
             break
-        file_values = response_data.get("values", [])
-        all_files.extend(file_values)
-        next_page = response_data.get("nextPageStart")
+        files = data.get("values", [])
+        all_files.extend(files)
+        next_page = data.get("nextPageStart")
         if not next_page:
             break
         start = next_page
     return all_files
 
 # ---------------------------------------------------------------------
-# Analysis Logic: Using Lexer or Fallback Based on File Extension
+# Analyze File List for Languages and Frameworks
 # ---------------------------------------------------------------------
 def analyze_file_list(file_list: list, use_lexer: bool, api_client=None, project_key=None, repo_slug=None, branch="master") -> dict:
-    """
-    Analyze the file list:
-      1. Collate all unique extensions with one sample file per extension.
-      2. If use_lexer is enabled, for each unique extension, fetch sample file content and use Pygments to guess the language.
-         Otherwise, use EXT_LANG_MAP.
-      3. Additionally, apply heuristics based on filename and folder path to infer frameworks.
-    """
-    unique_extensions = {}  # extension -> sample file path
+    unique_extensions = {}
     for file_path in file_list:
         base_name = os.path.basename(file_path)
         ext = os.path.splitext(base_name)[1].lower()
@@ -313,13 +319,11 @@ def analyze_file_list(file_list: list, use_lexer: bool, api_client=None, project
         for ext in unique_extensions.keys():
             if ext in EXT_LANG_MAP:
                 languages.add(EXT_LANG_MAP[ext])
-
-    # Apply additional heuristics across all file paths.
+                
     for file_path in file_list:
         base_name = os.path.basename(file_path)
         if base_name in FILE_FRAMEWORK_MAP:
             frameworks.add(FILE_FRAMEWORK_MAP[base_name])
-        # Folder-based heuristics:
         if "node_modules" in file_path:
             frameworks.add("Node.js")
         if "venv" in file_path or "env" in file_path:
@@ -328,6 +332,7 @@ def analyze_file_list(file_list: list, use_lexer: bool, api_client=None, project
             languages.add("Java")
         if "src/main/resources" in file_path:
             frameworks.add("Spring MVC")
+            
     return {
         "unique_extensions": list(sorted(unique_extensions.keys())),
         "languages": list(sorted(languages)),
@@ -336,41 +341,39 @@ def analyze_file_list(file_list: list, use_lexer: bool, api_client=None, project
     }
 
 # ---------------------------------------------------------------------
-# Repo Output: Write Individual Excel File per Processed Repository
+# SPK Output File Management (One File per SPK)
 # ---------------------------------------------------------------------
-def write_repo_output(project_key: str, repo_slug: str, record: dict):
-    """
-    Write the analysis record to an Excel file named {project_key}_{repo_slug}.xlsx in OUTPUT_FOLDER.
-    """
-    output_filename = f"{project_key}_{repo_slug}.xlsx"
-    output_filepath = os.path.join(OUTPUT_FOLDER, output_filename)
-    df = pd.DataFrame([record])
-    df.to_excel(output_filepath, index=False)
-    logger.info(f"Wrote output for {project_key}/{repo_slug} to {output_filepath}")
+def get_spk_output_filepath(project_key: str) -> str:
+    filename = f"{project_key}_repos.xlsx"
+    return os.path.join(OUTPUT_FOLDER, filename)
 
-def already_processed(project_key: str, repo_slug: str) -> bool:
-    """
-    Check if the output file for this repository already exists.
-    """
-    output_filename = f"{project_key}_{repo_slug}.xlsx"
-    output_filepath = os.path.join(OUTPUT_FOLDER, output_filename)
-    return os.path.isfile(output_filepath)
+def load_existing_spk_output(project_key: str) -> pd.DataFrame:
+    filepath = get_spk_output_filepath(project_key)
+    if os.path.isfile(filepath):
+        return pd.read_excel(filepath)
+    columns = [
+        "project_key", "repo_slug", "repo_id", "repo_url", "repo_name",
+        "branch_name", "last_commit_date", "file_count", 
+        "unique_extensions", "languages", "frameworks"
+    ]
+    return pd.DataFrame(columns=columns)
+
+def append_spk_record(filepath: str, record: dict, df_existing: pd.DataFrame) -> pd.DataFrame:
+    df_new = pd.DataFrame([record])
+    df_concat = pd.concat([df_existing, df_new], ignore_index=True)
+    df_concat.to_excel(filepath, index=False)
+    return df_concat
 
 # ---------------------------------------------------------------------
-# Process a Single Repository
+# Process a Single Repository – Returns Record
 # ---------------------------------------------------------------------
-def process_single_repo(api_client: GenericAPIClient, project_key: str, repo: dict) -> None:
+def process_single_repo(api_client: GenericAPIClient, project_key: str, repo: dict) -> dict:
     repo_slug = repo.get("slug")
-    if already_processed(project_key, repo_slug):
-        logger.info(f"Skipping {project_key}/{repo_slug} as output file already exists.")
-        return
-
-    # Always use the top-most branch (most recently modified) for processing.
     top_branch = get_top_branch(api_client, project_key, repo_slug)
-
+    last_commit_date = get_last_commit_date(api_client, project_key, repo_slug, top_branch)
     file_paths = get_files_with_pagination(api_client, project_key, repo_slug)
     analysis = analyze_file_list(file_paths, USE_LEXER_ANALYSIS, api_client, project_key, repo_slug, top_branch)
-
+    
     repo_id = repo.get("id")
     repo_name = repo.get("name", repo_slug)
     links = repo.get("links", {})
@@ -379,28 +382,39 @@ def process_single_repo(api_client: GenericAPIClient, project_key: str, repo: di
         repo_url = self_links[0].get("href", f"{api_client.base_url}/projects/{project_key}/repos/{repo_slug}")
     else:
         repo_url = f"{api_client.base_url}/projects/{project_key}/repos/{repo_slug}"
-
+    
     record = {
         "project_key": project_key,
         "repo_slug": repo_slug,
         "repo_id": repo_id,
         "repo_url": repo_url,
         "repo_name": repo_name,
+        "branch_name": top_branch,
+        "last_commit_date": last_commit_date,
         "file_count": analysis["file_count"],
         "unique_extensions": ", ".join(analysis["unique_extensions"]),
         "languages": ", ".join(analysis["languages"]),
         "frameworks": ", ".join(analysis["frameworks"])
     }
     logger.info(f"Processed {project_key}/{repo_slug} -> {record}")
-    write_repo_output(project_key, repo_slug, record)
+    return record
 
 # ---------------------------------------------------------------------
-# Process a Single SPK (Project)
+# Process All Repositories for an SPK – Write Combined Output
 # ---------------------------------------------------------------------
 def process_single_spk(api_client: GenericAPIClient, project_key: str) -> None:
+    # If SPK output file exists, skip processing the entire SPK.
+    spk_filepath = get_spk_output_filepath(project_key)
+    if os.path.isfile(spk_filepath):
+        logger.info(f"Skipping processing for SPK {project_key} as output file already exists at {spk_filepath}")
+        return
+    
+    df_spk = load_existing_spk_output(project_key)
     repos = get_repos(api_client, project_key)
     for repo in repos:
-        process_single_repo(api_client, project_key, repo)
+        record = process_single_repo(api_client, project_key, repo)
+        df_spk = append_spk_record(spk_filepath, record, df_spk)
+    logger.info(f"Finished processing SPK {project_key}, output written to {spk_filepath}")
 
 # ---------------------------------------------------------------------
 # Main Orchestration
