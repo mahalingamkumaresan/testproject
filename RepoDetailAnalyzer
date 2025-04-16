@@ -1,22 +1,3 @@
-#!/usr/bin/env python3
-"""
-BitbucketRepoAnalyzer – SPK Output Version (Skip Processed SPK)
-
-This script processes all repositories for each SPK (project key) read from an input Excel file.
-For each SPK:
-  - Before processing, it checks if the SPK’s output file (named "{project_key}_repos.xlsx" in the output folder)
-    already exists. If so, processing for that SPK is skipped.
-  - Otherwise, for each repository:
-       • It retrieves the top (most recently modified) branch.
-       • It retrieves the last commit date on that branch.
-       • It fetches all file paths via pagination (limit=1000).
-       • Optionally (if USE_LEXER_ANALYSIS is True), it uses Pygments to guess the language from sample file content;
-         otherwise, it falls back to extension-based mapping.
-       • It applies filename and folder heuristics to detect frameworks/technologies.
-  - Finally, it writes all records for that SPK into a single Excel file in the output folder.
-  
-Warnings (e.g., InsecureRequestWarning) are disabled.
-"""
 
 import os
 import time
@@ -39,8 +20,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ---------------------------------------------------------------------
 # Configuration Variables
 # ---------------------------------------------------------------------
-USE_LEXER_ANALYSIS = True   # Set to True to use real lexer-based analysis.
-BITBUCKET_BASE_URL = os.getenv("BITBUCKET_BASE_URL", "https://scm.horizon.bankofamerica.com/rest/api/latest")
+USE_LEXER_ANALYSIS = True
+BITBUCKET_BASE_URL = os.getenv(
+    "BITBUCKET_BASE_URL",
+    "https://scm.horizon.bankofamerica.com/rest/api/latest"
+)
 BITBUCKET_USERNAME = os.getenv("BITBUCKET_USERNAME", "")
 BITBUCKET_APP_PASSWORD = os.getenv("BITBUCKET_APP_PASSWORD", "")
 INPUT_EXCEL = r"C:\riskportal\spk.xlsx"
@@ -55,10 +39,10 @@ MAX_WORKERS = 5
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         log_record = {
-            "timestamp": self.formatTime(record, self.datefmt),
+            "timestamp": self.formatTime(record),
             "level": record.levelname,
             "module": record.name,
-            "message": record.getMessage()
+            "message": record.getMessage(),
         }
         if hasattr(record, "error_category"):
             log_record["error_category"] = record.error_category
@@ -67,391 +51,246 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(log_record)
 
 def configure_logging() -> logging.Logger:
-    logs_folder = os.path.join(OUTPUT_FOLDER, "logs")
-    os.makedirs(logs_folder, exist_ok=True)
-    log_path = os.path.join(logs_folder, "process_log.txt")
-    
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(JsonFormatter())
-    
-    file_handler = logging.FileHandler(log_path)
-    file_handler.setFormatter(JsonFormatter())
-    
-    logging.basicConfig(level=logging.DEBUG, handlers=[console_handler, file_handler])
+    os.makedirs(os.path.join(OUTPUT_FOLDER, "logs"), exist_ok=True)
+    log_path = os.path.join(OUTPUT_FOLDER, "logs", "process_log.txt")
+    console = logging.StreamHandler()
+    console.setFormatter(JsonFormatter())
+    fileh = logging.FileHandler(log_path)
+    fileh.setFormatter(JsonFormatter())
+    logging.basicConfig(level=logging.DEBUG, handlers=[console, fileh])
     return logging.getLogger("BitbucketRepoAnalyzer")
 
 logger = configure_logging()
 
 # ---------------------------------------------------------------------
-# Token Bucket for Rate Limiting
+# Token Bucket Rate Limiter
 # ---------------------------------------------------------------------
 class TokenBucket:
-    def __init__(self, capacity: int, tokens_per_second: float) -> None:
+    def __init__(self, capacity: int, tokens_per_second: float):
         self.capacity = capacity
         self.tokens_per_second = tokens_per_second
         self.tokens = capacity
-        self.last_refill = time.time()
+        self.last = time.time()
         self.lock = threading.Lock()
-        self.calls_made = 0
 
-    def consume(self, tokens: int = 1) -> None:
+    def consume(self, n: int = 1):
         while True:
             with self.lock:
                 now = time.time()
-                elapsed = now - self.last_refill
-                refill = elapsed * self.tokens_per_second
+                delta = now - self.last
+                refill = delta * self.tokens_per_second
                 if refill > 0:
                     self.tokens = min(self.capacity, self.tokens + refill)
-                    self.last_refill = now
-                if self.tokens >= tokens:
-                    self.tokens -= tokens
-                    self.calls_made += tokens
+                    self.last = now
+                if self.tokens >= n:
+                    self.tokens -= n
                     return
             time.sleep(0.1)
 
 # ---------------------------------------------------------------------
-# Generic API Client with Exponential Backoff
+# Generic API Client with Backoff
 # ---------------------------------------------------------------------
 class GenericAPIClient:
-    def __init__(self, base_url: str, token_bucket: TokenBucket, auth: tuple = None):
+    def __init__(self, base_url: str, bucket: TokenBucket, auth: tuple = None):
         self.base_url = base_url.rstrip("/")
-        self.token_bucket = token_bucket
-        self.auth = auth
+        self.bucket = bucket
         self.session = requests.Session()
-        if self.auth:
-            self.session.auth = self.auth
-        self.session.verify = False  # SSL verification disabled
+        if auth:
+            self.session.auth = auth
+        self.session.verify = False
         adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
         self.logger = logging.getLogger("GenericAPIClient")
 
     def make_request(self, endpoint: str, params: dict = None, retries: int = 3, base_delay: float = 1.0):
-        full_url = f"{self.base_url}{endpoint}"
-        response = None
-        for attempt in range(retries):
-            self.token_bucket.consume(1)
+        url = f"{self.base_url}{endpoint}"
+        for i in range(retries):
+            self.bucket.consume(1)
             try:
-                self.logger.debug(f"Requesting URL: {full_url} (Attempt {attempt+1}/{retries}), params={params}")
-                response = self.session.get(full_url, params=params)
-                response.raise_for_status()
-                return response.json(), None
-            except requests.exceptions.RequestException as e:
-                error_message = str(e)
-                status_code = response.status_code if response else "N/A"
-                self.logger.error(
-                    f"Error calling {full_url}: {error_message} (Status: {status_code})",
-                    extra={"error_category": "API Failure", "severity": "error"}
-                )
-                sleep_time = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                time.sleep(sleep_time)
+                self.logger.debug(f"GET {url} params={params} attempt={i+1}")
+                r = self.session.get(url, params=params)
+                r.raise_for_status()
+                return r.json(), None
+            except requests.RequestException as e:
+                code = r.status_code if 'r' in locals() else 'N/A'
+                self.logger.error(f"{url} failed: {e} (status {code})",
+                                  extra={"error_category":"API","severity":"error"})
+                time.sleep(base_delay * (2**i) + random.random())
         return None, "Max retries exceeded"
 
 # ---------------------------------------------------------------------
-# Get Top Branch (Most Recently Modified)
+# Technology Mappings
 # ---------------------------------------------------------------------
-def get_top_branch(api_client: GenericAPIClient, project_key: str, repo_slug: str) -> str:
-    endpoint = f"/projects/{project_key}/repos/{repo_slug}/branches"
-    params = {"orderBy": "MODIFICATION", "limit": 1}
-    data, error = api_client.make_request(endpoint, params=params)
-    if error or not data or "values" not in data or not data["values"]:
-        logger.warning(f"Unable to get top branch for {project_key}/{repo_slug}: Using fallback 'master'")
+EXT_LANG_MAP = {
+    ".java":"Java", ".kt":"Kotlin", ".sql":"SQL", ".pls":"PL/SQL",
+    ".pks":"PL/SQL", ".pkb":"PL/SQL", ".py":"Python", ".js":"JavaScript",
+    ".ts":"TypeScript", ".html":"HTML", ".htm":"HTML", ".sh":"Shell Script",
+    ".bash":"Shell Script", ".ksh":"Shell Script", ".vbs":"VBScript",
+    ".m":"Objective-C", ".swift":"Swift", ".cpp":"C++", ".c":"C",
+    ".cs":"C#", ".jsp":"JSP", ".cbl":"COBOL", ".cob":"COBOL"
+}
+FILE_FRAMEWORK_MAP = {
+    "pom.xml":"Maven", "build.gradle":"Gradle", "package.json":"Node.js",
+    "requirements.txt":"Python (pip)", "Gemfile":"Ruby on Rails",
+    "composer.json":"Composer (PHP)", "Cargo.toml":"Rust (Cargo)",
+    "Makefile":"Make", "web.config":".NET Framework", "project.json":".NET Core",
+    "struts.xml":"Struts", "applicationContext.xml":"Spring",
+    "spring-servlet.xml":"Spring MVC", "hibernate.cfg.xml":"Hibernate",
+    "beans.xml":"Java EE (CDI)", "mule-config.xml":"Mule ESB",
+    ".twb":"Tableau", ".twbx":"Tableau", "angular.js":"AngularJS",
+    "jquery.min.js":"jQuery"
+}
+
+# ---------------------------------------------------------------------
+# Helpers: Branch, Commits, Files
+# ---------------------------------------------------------------------
+def get_top_branch(client, pk, slug):
+    data, err = client.make_request(f"/projects/{pk}/repos/{slug}/branches",
+                                     params={"orderBy":"MODIFICATION","limit":1})
+    if err or not data.get("values"):
+        logger.warning(f"{pk}/{slug}: falling back to master")
         return "master"
-    return data["values"][0].get("displayId", "master")
+    return data["values"][0]["displayId"]
 
-# ---------------------------------------------------------------------
-# Get Last Commit Date from Top Branch
-# ---------------------------------------------------------------------
-def get_last_commit_date(api_client: GenericAPIClient, project_key: str, repo_slug: str, branch: str) -> str:
-    endpoint = f"/projects/{project_key}/repos/{repo_slug}/commits"
-    params = {"at": branch, "limit": 1}
-    data, error = api_client.make_request(endpoint, params=params)
-    if error or not data or "values" not in data or not data["values"]:
-        logger.warning(f"Unable to get commit data for {project_key}/{repo_slug} on branch {branch}")
+def get_last_commit_date(client, pk, slug, branch):
+    data, err = client.make_request(f"/projects/{pk}/repos/{slug}/commits",
+                                     params={"at":branch,"limit":1})
+    if err or not data.get("values"):
         return "N/A"
-    commit = data["values"][0]
-    timestamp = commit.get("authorTimestamp", 0)
-    if timestamp:
-        return datetime.fromtimestamp(timestamp / 1000).strftime("%Y-%m-%d %H:%M:%S")
-    return "N/A"
+    ts = data["values"][0].get("authorTimestamp",0)
+    return datetime.fromtimestamp(ts/1000).strftime("%Y-%m-%d %H:%M:%S") if ts else "N/A"
 
-# ---------------------------------------------------------------------
-# Get Raw File Content from Bitbucket
-# ---------------------------------------------------------------------
-def get_file_content(api_client: GenericAPIClient, project_key: str, repo_slug: str, branch: str, file_path: str) -> str:
-    file_path_clean = file_path.lstrip("/")
-    endpoint = f"/projects/{project_key}/repos/{repo_slug}/raw/{file_path_clean}"
-    params = {"at": branch}
-    api_client.token_bucket.consume(1)
+def get_files_with_pagination(client, pk, slug, branch):
+    files=[]; start=0; limit=1000
+    while True:
+        data, err = client.make_request(
+            f"/projects/{pk}/repos/{slug}/files",
+            params={"limit":limit,"start":start,"at":branch}
+        )
+        if err: break
+        vals = data.get("values",[])
+        files.extend(vals)
+        nxt = data.get("nextPageStart")
+        if not nxt: break
+        start=nxt
+    return files
+
+def get_file_content(client, pk, slug, branch, path):
+    p=path.lstrip("/")
+    client.bucket.consume()
     try:
-        url = f"{api_client.base_url}{endpoint}"
-        response = api_client.session.get(url, params=params)
-        response.raise_for_status()
-        return response.text
+        r=client.session.get(
+            f"{client.base_url}/projects/{pk}/repos/{slug}/raw/{p}",
+            params={"at":branch}, verify=False
+        )
+        r.raise_for_status()
+        return r.text
     except Exception as e:
-        logger.error(f"Failed to fetch content for {file_path} in {project_key}/{repo_slug}: {e}",
-                     extra={"error_category": "File Fetch Error", "severity": "error"})
+        logger.error(f"raw/{p} error: {e}", extra={"error_category":"FileFetch"})
         return ""
 
 # ---------------------------------------------------------------------
-# Mappings for Language and Framework Detection (Expanded)
+# Analyze file list for languages & frameworks
 # ---------------------------------------------------------------------
-EXT_LANG_MAP = {
-    ".java": "Java",
-    ".kt": "Kotlin",
-    ".sql": "SQL",
-    ".pls": "PL/SQL",
-    ".pks": "PL/SQL",
-    ".pkb": "PL/SQL",
-    ".py": "Python",
-    ".js": "JavaScript",
-    ".ts": "TypeScript",
-    ".html": "HTML",
-    ".htm": "HTML",
-    ".sh": "Shell Script",
-    ".bash": "Shell Script",
-    ".ksh": "Shell Script",
-    ".vbs": "VBScript",
-    ".m": "Objective-C",
-    ".swift": "Swift",
-    ".cpp": "C++",
-    ".c": "C",
-    ".cs": "C#",
-    ".jsp": "JSP",
-    ".cbl": "COBOL",
-    ".cob": "COBOL",
-    # Extend as needed...
-}
+def analyze_file_list(file_list, use_lexer, client, pk, slug, branch):
+    uniq = {}
+    for fp in file_list:
+        ext = os.path.splitext(os.path.basename(fp))[1].lower()
+        if ext not in uniq: uniq[ext]=fp
 
-FILE_FRAMEWORK_MAP = {
-    "pom.xml": "Maven",
-    "build.gradle": "Gradle",
-    "package.json": "Node.js",
-    "requirements.txt": "Python (pip)",
-    "Gemfile": "Ruby on Rails",
-    "composer.json": "Composer (PHP)",
-    "Cargo.toml": "Rust (Cargo)",
-    "Makefile": "Make",
-    "web.config": ".NET Framework",
-    "project.json": ".NET Core",
-    "struts.xml": "Struts",
-    "applicationContext.xml": "Spring",
-    "spring-servlet.xml": "Spring MVC",
-    "hibernate.cfg.xml": "Hibernate",
-    "beans.xml": "Java EE (CDI)",
-    "mule-config.xml": "Mule ESB",
-    ".twb": "Tableau",
-    ".twbx": "Tableau",
-    "angular.js": "AngularJS",
-    "jquery.min.js": "jQuery",
-    # Extend further as needed...
-}
-
-# ---------------------------------------------------------------------
-# Retrieve All Repositories for an SPK
-# ---------------------------------------------------------------------
-def get_repos(api_client: GenericAPIClient, project_key: str) -> list:
-    endpoint = f"/projects/{project_key}/repos"
-    params = {"limit": 1000}
-    data, error = api_client.make_request(endpoint, params=params)
-    if error:
-        logger.error(f"Failed to get repos for project {project_key}: {error}",
-                     extra={"error_category": "API Failure", "severity": "error"})
-        return []
-    return data.get("values", [])
-
-# ---------------------------------------------------------------------
-# Retrieve All Files for a Repository (With Pagination)
-# ---------------------------------------------------------------------
-def get_files_with_pagination(api_client: GenericAPIClient, project_key: str, repo_slug: str) -> list:
-    all_files = []
-    start = 0
-    limit = 1000
-    while True:
-        endpoint = f"/projects/{project_key}/repos/{repo_slug}/files"
-        params = {"limit": limit, "start": start}
-        data, error = api_client.make_request(endpoint, params=params)
-        if error:
-            logger.error(f"Failed to retrieve files for {project_key}/{repo_slug} (start={start}): {error}",
-                         extra={"error_category": "API Failure", "severity": "error"})
-            break
-        files = data.get("values", [])
-        all_files.extend(files)
-        next_page = data.get("nextPageStart")
-        if not next_page:
-            break
-        start = next_page
-    return all_files
-
-# ---------------------------------------------------------------------
-# Analyze File List for Languages and Frameworks
-# ---------------------------------------------------------------------
-def analyze_file_list(file_list: list, use_lexer: bool, api_client=None, project_key=None, repo_slug=None, branch="master") -> dict:
-    unique_extensions = {}
-    for file_path in file_list:
-        base_name = os.path.basename(file_path)
-        ext = os.path.splitext(base_name)[1].lower()
-        if ext and ext not in unique_extensions:
-            unique_extensions[ext] = file_path
-
-    languages = set()
-    frameworks = set()
-
-    if use_lexer and api_client and project_key and repo_slug:
-        for ext, sample_file in unique_extensions.items():
-            content = get_file_content(api_client, project_key, repo_slug, branch, sample_file)
+    langs, frs = set(), set()
+    if use_lexer:
+        for ext, sample in uniq.items():
+            content = get_file_content(client, pk, slug, branch, sample)
             if content:
                 try:
-                    lexer = guess_lexer_for_filename("dummy" + ext, content)
-                    languages.add(lexer.name)
+                    lx = guess_lexer_for_filename("x"+ext,content)
+                    langs.add(lx.name)
                 except ClassNotFound:
-                    if ext in EXT_LANG_MAP:
-                        languages.add(EXT_LANG_MAP[ext])
-                except Exception as e:
-                    logger.error(f"Lexer error for file {sample_file}: {e}",
-                                 extra={"error_category": "Lexer Error", "severity": "error"})
-                    if ext in EXT_LANG_MAP:
-                        languages.add(EXT_LANG_MAP[ext])
+                    if ext in EXT_LANG_MAP: langs.add(EXT_LANG_MAP[ext])
+                except:
+                    if ext in EXT_LANG_MAP: langs.add(EXT_LANG_MAP[ext])
             else:
-                if ext in EXT_LANG_MAP:
-                    languages.add(EXT_LANG_MAP[ext])
+                if ext in EXT_LANG_MAP: langs.add(EXT_LANG_MAP[ext])
     else:
-        for ext in unique_extensions.keys():
-            if ext in EXT_LANG_MAP:
-                languages.add(EXT_LANG_MAP[ext])
-                
-    for file_path in file_list:
-        base_name = os.path.basename(file_path)
-        if base_name in FILE_FRAMEWORK_MAP:
-            frameworks.add(FILE_FRAMEWORK_MAP[base_name])
-        if "node_modules" in file_path:
-            frameworks.add("Node.js")
-        if "venv" in file_path or "env" in file_path:
-            frameworks.add("Python VirtualEnv")
-        if "src/main/java" in file_path:
-            languages.add("Java")
-        if "src/main/resources" in file_path:
-            frameworks.add("Spring MVC")
-            
+        for ext in uniq:
+            if ext in EXT_LANG_MAP: langs.add(EXT_LANG_MAP[ext])
+
+    for fp in file_list:
+        bn=os.path.basename(fp)
+        if bn in FILE_FRAMEWORK_MAP: frs.add(FILE_FRAMEWORK_MAP[bn])
+        if "node_modules" in fp: frs.add("Node.js")
+        if "venv" in fp or "env" in fp: frs.add("Python VirtualEnv")
+        if "src/main/java" in fp: langs.add("Java")
+        if "src/main/resources" in fp: frs.add("Spring MVC")
+
+    exts = ["<no extension>" if e=="" else e for e in sorted(uniq)]
     return {
-        "unique_extensions": list(sorted(unique_extensions.keys())),
-        "languages": list(sorted(languages)),
-        "frameworks": list(sorted(frameworks)),
+        "unique_extensions": exts,
+        "languages": sorted(langs),
+        "frameworks": sorted(frs),
         "file_count": len(file_list)
     }
 
 # ---------------------------------------------------------------------
-# SPK Output File Management (One File per SPK)
+# SPK Output Management
 # ---------------------------------------------------------------------
-def get_spk_output_filepath(project_key: str) -> str:
-    filename = f"{project_key}_repos.xlsx"
-    return os.path.join(OUTPUT_FOLDER, filename)
+def spk_filepath(pk):
+    return os.path.join(OUTPUT_FOLDER, f"{pk}_repos.xlsx")
 
-def load_existing_spk_output(project_key: str) -> pd.DataFrame:
-    filepath = get_spk_output_filepath(project_key)
-    if os.path.isfile(filepath):
-        return pd.read_excel(filepath)
-    columns = [
-        "project_key", "repo_slug", "repo_id", "repo_url", "repo_name",
-        "branch_name", "last_commit_date", "file_count", 
-        "unique_extensions", "languages", "frameworks"
-    ]
-    return pd.DataFrame(columns=columns)
-
-def append_spk_record(filepath: str, record: dict, df_existing: pd.DataFrame) -> pd.DataFrame:
-    df_new = pd.DataFrame([record])
-    df_concat = pd.concat([df_existing, df_new], ignore_index=True)
-    df_concat.to_excel(filepath, index=False)
-    return df_concat
-
-# ---------------------------------------------------------------------
-# Process a Single Repository – Returns Record
-# ---------------------------------------------------------------------
-def process_single_repo(api_client: GenericAPIClient, project_key: str, repo: dict) -> dict:
-    repo_slug = repo.get("slug")
-    top_branch = get_top_branch(api_client, project_key, repo_slug)
-    last_commit_date = get_last_commit_date(api_client, project_key, repo_slug, top_branch)
-    file_paths = get_files_with_pagination(api_client, project_key, repo_slug)
-    analysis = analyze_file_list(file_paths, USE_LEXER_ANALYSIS, api_client, project_key, repo_slug, top_branch)
-    
-    repo_id = repo.get("id")
-    repo_name = repo.get("name", repo_slug)
-    links = repo.get("links", {})
-    self_links = links.get("self", [])
-    if self_links and isinstance(self_links, list):
-        repo_url = self_links[0].get("href", f"{api_client.base_url}/projects/{project_key}/repos/{repo_slug}")
-    else:
-        repo_url = f"{api_client.base_url}/projects/{project_key}/repos/{repo_slug}"
-    
-    record = {
-        "project_key": project_key,
-        "repo_slug": repo_slug,
-        "repo_id": repo_id,
-        "repo_url": repo_url,
-        "repo_name": repo_name,
-        "branch_name": top_branch,
-        "last_commit_date": last_commit_date,
-        "file_count": analysis["file_count"],
-        "unique_extensions": ", ".join(analysis["unique_extensions"]),
-        "languages": ", ".join(analysis["languages"]),
-        "frameworks": ", ".join(analysis["frameworks"])
-    }
-    logger.info(f"Processed {project_key}/{repo_slug} -> {record}")
-    return record
-
-# ---------------------------------------------------------------------
-# Process All Repositories for an SPK – Write Combined Output
-# ---------------------------------------------------------------------
-def process_single_spk(api_client: GenericAPIClient, project_key: str) -> None:
-    # If SPK output file exists, skip processing the entire SPK.
-    spk_filepath = get_spk_output_filepath(project_key)
-    if os.path.isfile(spk_filepath):
-        logger.info(f"Skipping processing for SPK {project_key} as output file already exists at {spk_filepath}")
+def process_spk(client, pk):
+    out = spk_filepath(pk)
+    if os.path.isfile(out):
+        logger.info(f"Skipping SPK {pk}: {out} exists")
         return
-    
-    df_spk = load_existing_spk_output(project_key)
-    repos = get_repos(api_client, project_key)
-    for repo in repos:
-        record = process_single_repo(api_client, project_key, repo)
-        df_spk = append_spk_record(spk_filepath, record, df_spk)
-    logger.info(f"Finished processing SPK {project_key}, output written to {spk_filepath}")
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+    df = pd.DataFrame(columns=[
+        "project_key","repo_slug","repo_id","repo_url","repo_name",
+        "branch_name","last_commit_date","file_count",
+        "unique_extensions","languages","frameworks"
+    ])
+    repos = get_repos(client, pk)
+    for r in repos:
+        slug=r["slug"]
+        branch=get_top_branch(client,pk,slug)
+        lcd=get_last_commit_date(client,pk,slug,branch)
+        files=get_files_with_pagination(client,pk,slug,branch)
+        an=analyze_file_list(files,USE_LEXER_ANALYSIS,client,pk,slug,branch)
+        url=(r.get("links") or {}).get("self",[{}])[0].get("href",
+            f"{client.base_url}/projects/{pk}/repos/{slug}")
+        rec={
+            "project_key":pk,"repo_slug":slug,"repo_id":r.get("id"),
+            "repo_url":url,"repo_name":r.get("name",slug),
+            "branch_name":branch,"last_commit_date":lcd,
+            "file_count":an["file_count"],
+            "unique_extensions":", ".join(an["unique_extensions"]),
+            "languages":", ".join(an["languages"]),
+            "frameworks":", ".join(an["frameworks"])
+        }
+        df = pd.concat([df, pd.DataFrame([rec])], ignore_index=True)
+    df.to_excel(out, index=False)
+    logger.info(f"Wrote SPK output: {out}")
 
-# ---------------------------------------------------------------------
-# Main Orchestration
-# ---------------------------------------------------------------------
+def get_repos(client, pk):
+    data, err = client.make_request(f"/projects/{pk}/repos", params={"limit":1000})
+    if err: return []
+    return data.get("values",[])
+
 def main():
-    start_time = datetime.now()
-    logger.info("BitbucketRepoAnalyzer started.")
-
+    start = datetime.now()
+    logger.info("Starting BitbucketRepoAnalyzer")
     if not os.path.isfile(INPUT_EXCEL):
-        logger.error(f"Input file not found: {INPUT_EXCEL}")
+        logger.error(f"Missing input: {INPUT_EXCEL}")
         return
+    wb=load_workbook(INPUT_EXCEL)
+    spks=[r[0] for r in wb.active.iter_rows(min_row=2,values_only=True) if r and r[0]]
+    bucket=TokenBucket(TOKEN_BUCKET_CAPACITY,TOKENS_PER_SECOND)
+    client=GenericAPIClient(BITBUCKET_BASE_URL,bucket,auth=(BITBUCKET_USERNAME,BITBUCKET_APP_PASSWORD))
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        for pk in spks:
+            ex.submit(process_spk, client, pk)
+    logger.info(f"Completed in {datetime.now()-start}")
 
-    wb = load_workbook(INPUT_EXCEL)
-    sheet = wb.active
-    spk_rows = list(sheet.iter_rows(min_row=2, values_only=True))
-    spk_list = [row[0] for row in spk_rows if row and row[0]]
-
-    token_bucket = TokenBucket(TOKEN_BUCKET_CAPACITY, TOKENS_PER_SECOND)
-    api_client = GenericAPIClient(BITBUCKET_BASE_URL, token_bucket, auth=(BITBUCKET_USERNAME, BITBUCKET_APP_PASSWORD))
-
-    def spk_worker(spk: str) -> str:
-        process_single_spk(api_client, spk)
-        return spk
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(spk_worker, spk): spk for spk in spk_list}
-        for future in as_completed(futures):
-            spk_key = futures[future]
-            try:
-                future.result()
-                logger.info(f"Finished processing SPK {spk_key}")
-            except Exception as e:
-                logger.error(f"Error processing SPK {spk_key}: {e}",
-                             extra={"error_category": "Processing Error", "severity": "error"})
-
-    end_time = datetime.now()
-    logger.info(f"BitbucketRepoAnalyzer completed in {end_time - start_time}")
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
