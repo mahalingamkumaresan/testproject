@@ -1,24 +1,6 @@
 #!/usr/bin/env python3
 """
-BitbucketRepoAnalyzer with Top Branch Processing and Expanded Language/Framework Mapping
 
-Features:
-  1. Reads SPKs (project keys) from C:\riskportal\WTMSPK.xlsx.
-  2. For each SPK:
-       - Retrieves all repositories.
-       - For each repository:
-           • Skips processing if an output file (named as {project_key}_{repo_slug}.xlsx) already exists.
-           • Determines the top (most recently modified) branch.
-           • Retrieves all file paths via pagination (limit=1000).
-           • For each unique file extension, if USE_LEXER_ANALYSIS is True, fetch a sample file’s content and use Pygments to guess the language; otherwise, or if the lexer fails, fall back to an extension‐based mapping.
-           • Applies heuristics (based on filenames and folder paths) to infer frameworks/technologies.
-       - Writes the repository’s analysis immediately to an Excel file named {project_key}_{repo_slug}.xlsx in C:\riskportal.
-       
-Configuration:
-  - Input file: C:\riskportal\WTMSPK.xlsx
-  - Output folder: C:\riskportal\
-  - Always uses the top-most branch (based on modification date) for processing.
-  - Expanded mappings for many important technologies.
 """
 
 import os
