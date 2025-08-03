@@ -1,0 +1,207 @@
+import oracledb
+import requests
+import subprocess
+import json
+import time
+import threading
+import logging
+from collections import deque
+import os
+
+# ========== CONFIGURATION ==========
+BATCH_SIZE = 100
+BITBUCKET_USER = "your_username"
+BITBUCKET_PASS = "your_app_password"
+BITBUCKET_API_BASE = "https://bitbucket.example.com/rest/api/1.0"
+ORACLE_USER = "YOUR_USER"
+ORACLE_PASS = "YOUR_PASS"
+ORACLE_DSN = "YOUR_DSN"
+LOG_FILE = "commit_analysis.log"
+SKILLS_JSON = "skills_research_full.json"  # Should be in the same directory
+
+# ========== LOGGING ==========
+logging.basicConfig(
+    filename=LOG_FILE,
+    filemode="a",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+console = logging.StreamHandler()
+console.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+console.setFormatter(formatter)
+logging.getLogger().addHandler(console)
+
+# ========== TOKEN BUCKET ==========
+class TokenBucket:
+    def __init__(self, capacity, refill_rate):
+        self.capacity = capacity
+        self.tokens = capacity
+        self.refill_rate = refill_rate
+        self.lock = threading.Lock()
+        self.last_check = time.time()
+
+    def consume(self, amount=1):
+        with self.lock:
+            now = time.time()
+            elapsed = now - self.last_check
+            add_tokens = int(elapsed * self.refill_rate)
+            if add_tokens > 0:
+                self.tokens = min(self.capacity, self.tokens + add_tokens)
+                self.last_check = now
+            if self.tokens < amount:
+                wait_time = (amount - self.tokens) / self.refill_rate
+                logging.info(f"Rate limit: Sleeping {wait_time:.2f}s for tokens.")
+                time.sleep(wait_time)
+                self.tokens = min(self.capacity, self.tokens + int(wait_time * self.refill_rate))
+                self.last_check = time.time()
+            self.tokens -= amount
+
+# ========== SKILL RESOLUTION ==========
+def load_skill_json(path):
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+def resolve_skill(file_ext, repo, project_key, file_path, skill_db):
+    file_ext = file_ext.lower()
+    candidates = skill_db.get(file_ext, [])
+    if len(candidates) == 0:
+        return "Unknown", "Unknown", "Unknown", "Unknown", "Unknown"
+    if len(candidates) == 1:
+        c = candidates[0]
+        return (
+            c.get('skill', 'Unknown'),
+            c.get('category', 'Unknown'),
+            c.get('description', ''),
+            c.get('ambiguous', 'No'),
+            c.get('ambiguity_resolver', '')
+        )
+    # Ambiguity resolver logic:
+    # Try to resolve by repo, project_key, file_path if present
+    filtered = []
+    for c in candidates:
+        resolver = c.get('ambiguity_resolver', '') or ''
+        if repo and repo.lower() in resolver.lower():
+            filtered.append(c)
+        elif project_key and project_key.lower() in resolver.lower():
+            filtered.append(c)
+        elif file_path and file_path.lower() in resolver.lower():
+            filtered.append(c)
+    if len(filtered) == 1:
+        c = filtered[0]
+        return (
+            c.get('skill', 'Unknown'),
+            c.get('category', 'Unknown'),
+            c.get('description', ''),
+            c.get('ambiguous', 'Yes'),
+            c.get('ambiguity_resolver', resolver)
+        )
+    # If ambiguity remains
+    return ("Ambiguous", "Ambiguous", "", "Yes", "; ".join([c.get('ambiguity_resolver','') for c in candidates]))
+
+# ========== LINGUIST CALL ==========
+def get_languages_from_linguist(file_content, file_name):
+    temp_filename = "temp_linguist_file"
+    try:
+        with open(temp_filename, "w", encoding="utf-8") as f:
+            f.write(file_content)
+        result = subprocess.run(["linguist", "--json", temp_filename], capture_output=True, text=True)
+        data = json.loads(result.stdout)
+        lang_dict = data.get(temp_filename, {})
+        return lang_dict  # {language: percent}
+    except Exception as e:
+        logging.error(f"Linguist failed for {file_name}: {e}")
+        return {}
+    finally:
+        try:
+            os.remove(temp_filename)
+        except Exception:
+            pass
+
+# ========== MAIN ==========
+def main():
+    logging.info("Starting Bitbucket commit analysis with skill resolution...")
+    token_bucket = TokenBucket(capacity=75, refill_rate=5)
+    skill_db = load_skill_json(SKILLS_JSON)
+    conn = oracledb.connect(user=ORACLE_USER, password=ORACLE_PASS, dsn=ORACLE_DSN)
+    cur = conn.cursor()
+    offset = 0
+    total_processed = 0
+
+    cur.execute("SELECT DISTINCT commit_id FROM tb_cbwt_commit_analysis")
+    processed_commit_ids = set(row[0] for row in cur.fetchall())
+
+    while True:
+        cur.execute(f"""
+            SELECT commit_id, repo, project_key
+            FROM tb_cbwt_contribution
+            WHERE commit_id NOT IN (
+                SELECT commit_id FROM tb_cbwt_commit_analysis
+            )
+            OFFSET {offset} ROWS FETCH NEXT {BATCH_SIZE} ROWS ONLY
+        """)
+        rows = cur.fetchall()
+        if not rows:
+            logging.info("No more commits to process. Exiting.")
+            break
+
+        for commit_id, repo, project_key in rows:
+            if commit_id in processed_commit_ids:
+                logging.info(f"Skipping already-processed commit {commit_id}")
+                continue
+
+            api_url = f"{BITBUCKET_API_BASE}/projects/{project_key}/repos/{repo}/commits/{commit_id}/changes"
+            token_bucket.consume()
+            response = requests.get(api_url, auth=(BITBUCKET_USER, BITBUCKET_PASS))
+            if response.status_code != 200:
+                logging.error(f"Failed to get changes for {commit_id} ({repo}/{project_key}): {response.status_code}")
+                continue
+
+            changes = response.json().get("values", [])
+            for change in changes:
+                file_path = change.get("path", {}).get("toString")
+                if not file_path:
+                    continue
+                _, file_ext = os.path.splitext(file_path)
+                if not file_ext:
+                    continue  # skip files without extension
+
+                raw_url = f"{BITBUCKET_API_BASE}/projects/{project_key}/repos/{repo}/raw/{file_path}?at={commit_id}"
+                token_bucket.consume()
+                raw_resp = requests.get(raw_url, auth=(BITBUCKET_USER, BITBUCKET_PASS))
+                if raw_resp.status_code != 200:
+                    logging.warning(f"Failed to get file {file_path} for commit {commit_id}: {raw_resp.status_code}")
+                    continue
+                file_content = raw_resp.text
+
+                lang_dict = get_languages_from_linguist(file_content, file_path)
+                if not lang_dict:
+                    logging.info(f"No languages detected for {file_path} in {commit_id}")
+                    continue
+
+                for language, percent in lang_dict.items():
+                    skill, category, description, ambiguous, ambiguity_resolver = resolve_skill(
+                        file_ext, repo, project_key, file_path, skill_db
+                    )
+                    try:
+                        cur.execute("""
+                            INSERT INTO tb_cbwt_commit_analysis
+                            (commit_id, repo, project_key, file_path, language, language_percent, skill, category, description, ambiguous, ambiguity_resolver)
+                            VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11)
+                        """, (commit_id, repo, project_key, file_path, language, percent, skill, category, description, ambiguous, ambiguity_resolver))
+                        conn.commit()
+                        msg = f"Inserted: commit={commit_id} file={file_path} lang={language} ({percent}%) skill={skill}"
+                        logging.info(msg)
+                        total_processed += 1
+                    except Exception as e:
+                        logging.error(f"Failed to insert analysis row for {commit_id}, {file_path}, {language}: {e}")
+
+        offset += BATCH_SIZE
+        logging.info(f"Batch complete. Total processed: {total_processed}")
+
+    cur.close()
+    conn.close()
+    logging.info("All processing complete.")
+
+if __name__ == "__main__":
+    main()
